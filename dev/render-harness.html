@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FABLE UNIVERSE — render harness</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #status { position: fixed; top: 8px; left: 10px; color: #8aa;
+            font: 12px monospace; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="status"></div>
+
+<script>
+/* ------------------------------------------------------------------
+   Stub Bodies store — the real js/core/bodies.js is built in
+   parallel; this mirrors its contract surface (parallel typed
+   arrays + add()) closely enough for the renderer, which only
+   reads n / px / py / pz / rad / colorIdx / type.
+   ------------------------------------------------------------------ */
+(function () {
+  const CAP = 1 << 16;
+  const B = {
+    CAP, n: 0,
+    px: new Float64Array(CAP), py: new Float64Array(CAP), pz: new Float64Array(CAP),
+    vx: new Float64Array(CAP), vy: new Float64Array(CAP), vz: new Float64Array(CAP),
+    mass: new Float64Array(CAP),
+    rad: new Float32Array(CAP),
+    colorIdx: new Uint8Array(CAP),
+    type: new Uint8Array(CAP),
+    names: new Array(CAP).fill(null),
+    TYPE_STAR: 0, TYPE_BH: 1, TYPE_PLANET: 2, TYPE_DUST: 3, TYPE_GAS: 4,
+    add(x, y, z, vx, vy, vz, m, r, c, t, name) {
+      if (this.n >= CAP) return -1;
+      const i = this.n++;
+      this.px[i] = x; this.py[i] = y; this.pz[i] = z;
+      this.vx[i] = vx; this.vy[i] = vy; this.vz[i] = vz;
+      this.mass[i] = m; this.rad[i] = r;
+      this.colorIdx[i] = c; this.type[i] = t;
+      this.names[i] = name || null;
+      return i;
+    },
+    clear() { this.n = 0; this.names.fill(null); },
+  };
+  globalThis.Bodies = B;
+
+  // -------- synthetic scene --------
+  const TAU = Math.PI * 2;
+  function gauss() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+  }
+  function starColor() {
+    const u = Math.random();
+    if (u < 0.45) return 6;
+    if (u < 0.70) return 5;
+    if (u < 0.85) return 4;
+    if (u < 0.93) return 3;
+    if (u < 0.97) return 2;
+    if (u < 0.99) return 1;
+    return 0;
+  }
+  const TILT = 0.45, ct = Math.cos(TILT), st = Math.sin(TILT);
+  function tilted(x, y0, z0) {            // rotate disk about +X
+    return [x, y0 * ct - z0 * st, y0 * st + z0 * ct];
+  }
+
+  // tilted disk of stars
+  for (let i = 0; i < 4200; i++) {
+    const r = 50 + 560 * Math.sqrt(Math.random());
+    const th = Math.random() * TAU;
+    const thick = 26 * Math.exp(-r / 500);
+    const [x, y, z] = tilted(r * Math.cos(th), gauss() * thick, r * Math.sin(th));
+    B.add(x, y, z, 0, 0, 0, 1, 1.0 + 2.6 * Math.pow(Math.random(), 2), starColor(), B.TYPE_STAR);
+  }
+  // central bulge
+  for (let i = 0; i < 600; i++) {
+    const [x, y, z] = tilted(gauss() * 60, gauss() * 38, gauss() * 60);
+    B.add(x, y, z, 0, 0, 0, 1, 1.2 + 2.2 * Math.random(), Math.random() < 0.5 ? 7 : starColor(), B.TYPE_STAR);
+  }
+  // dust lanes in the disk
+  for (let i = 0; i < 500; i++) {
+    const r = 120 + 480 * Math.sqrt(Math.random());
+    const th = Math.random() * TAU;
+    const [x, y, z] = tilted(r * Math.cos(th), gauss() * 8, r * Math.sin(th));
+    B.add(x, y, z, 0, 0, 0, 0, 1.4 + Math.random(), 11, B.TYPE_DUST);
+  }
+  // two gas clouds (nebulae)
+  for (let c = 0; c < 2; c++) {
+    const cr = 330, cth = c === 0 ? 0.8 : 3.6;
+    const [cx, cy, cz] = tilted(cr * Math.cos(cth), 0, cr * Math.sin(cth));
+    for (let i = 0; i < 100; i++) {
+      B.add(cx + gauss() * 85, cy + gauss() * 55, cz + gauss() * 85,
+            0, 0, 0, 0, 28 + 45 * Math.random(), c === 0 ? 9 : 10, B.TYPE_GAS);
+    }
+  }
+  // three planets at different distances
+  B.add(170,  30,   90, 0, 0, 0, 0, 14, 5,  B.TYPE_PLANET, 'amber');
+  B.add(-300, 60,  170, 0, 0, 0, 0, 22, 10, B.TYPE_PLANET, 'teal');
+  B.add(80,  -20, -380, 0, 0, 0, 0, 28, 3,  B.TYPE_PLANET, 'pearl');
+  // one wandering black hole
+  B.add(430, 70, -140, 0, 0, 0, 0, 18, 8, B.TYPE_BH, 'maw');
+})();
+</script>
+
+<script src="../js/render/camera.js"></script>
+<script src="../js/render/renderer.js"></script>
+
+<script>
+(function () {
+  const canvas = document.getElementById('c');
+  const status = document.getElementById('status');
+  const cam = globalThis.Camera3D;
+  const R = globalThis.Renderer3D;
+
+  const mode = R.init(canvas);
+  if (mode !== 'webgl2') {
+    status.textContent = 'WebGL2 unavailable';
+    window.__frames = -1;
+    return;
+  }
+
+  function fit() {
+    const dpr = window.devicePixelRatio || 1;
+    R.resize(window.innerWidth, window.innerHeight, dpr);
+  }
+  window.addEventListener('resize', fit);
+  fit();
+
+  cam.setGoal({ targetX: 0, targetY: 0, targetZ: 0, dist: 1350, yaw: 0.5, pitch: 0.42 });
+  cam.snap();
+
+  const lightPos = { x: 0, y: 160, z: 40 };  // near galactic center
+
+  // ---- test hooks (used by the Playwright check) ----
+  window.__frames = 0;
+  window.__trails = false;
+  window.__orbiting = true;
+  window.__setView = function (yaw, pitch, dist) {
+    cam.setGoal({ yaw, pitch, dist });
+    cam.snap();
+  };
+  window.__setTrails = function (on) { window.__trails = !!on; };
+  window.__setOrbiting = function (on) { window.__orbiting = !!on; };
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = now - last;
+    last = now;
+    if (window.__orbiting) cam.orbit(0.00012 * dt, 0);  // slow auto-orbit
+    cam.update(dt);
+    const aspect = canvas.width / Math.max(1, canvas.height);
+    R.render({
+      viewProj: cam.viewProj(aspect),
+      eye: cam.eye(),
+      lightPos,
+      trails: window.__trails,
+      timeMs: now,
+    });
+    window.__frames++;
+    if ((window.__frames & 15) === 0) {
+      status.textContent =
+        `bodies ${Bodies.n} | yaw ${cam.yaw.toFixed(2)} pitch ${cam.pitch.toFixed(2)} dist ${cam.dist.toFixed(0)}`;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // basic manual controls so the harness is usable by hand
+  let drag = null;
+  canvas.addEventListener('mousedown', e => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; });
+  window.addEventListener('mouseup', () => { drag = null; });
+  window.addEventListener('mousemove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (drag.pan) cam.pan(dx, dy, window.innerHeight);
+    else cam.orbit(-dx * 0.005, dy * 0.005);
+  });
+  canvas.addEventListener('wheel', e => { cam.dolly(Math.exp(e.deltaY * 0.001)); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  window.addEventListener('keydown', e => {
+    if (e.key === 't') window.__trails = !window.__trails;
+    if (e.key === 'o') window.__orbiting = !window.__orbiting;
+  });
+})();
+</script>
+</body>
+</html>
