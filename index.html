@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FABLE UNIVERSE — N-Body Simulator</title>
+<style>
+  :root {
+    --panel-bg: rgba(10, 14, 26, 0.78);
+    --panel-border: rgba(120, 160, 255, 0.18);
+    --accent: #7aa2ff;
+    --accent-dim: #44598f;
+    --text: #cdd6f4;
+    --text-dim: #7a86a8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace; color: var(--text); }
+  #space { position: fixed; inset: 0; display: block; cursor: grab; }
+  #space.grabbing { cursor: grabbing; }
+  #space.tool-bh { cursor: crosshair; }
+  #space.tool-well { cursor: cell; }
+
+  #panel {
+    position: fixed; top: 16px; left: 16px; width: 248px;
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    border-radius: 12px; padding: 14px 16px; backdrop-filter: blur(12px);
+    user-select: none; z-index: 10;
+  }
+  #panel h1 {
+    font-size: 13px; letter-spacing: 3px; font-weight: 600; color: var(--accent);
+    margin-bottom: 2px;
+  }
+  #panel .sub { font-size: 9px; color: var(--text-dim); letter-spacing: 1px; margin-bottom: 12px; }
+  .section { font-size: 9px; letter-spacing: 2px; color: var(--text-dim); margin: 12px 0 6px; }
+  .presets { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+  button {
+    font-family: inherit; font-size: 10px; padding: 6px 4px;
+    background: rgba(122, 162, 255, 0.08); color: var(--text);
+    border: 1px solid var(--panel-border); border-radius: 6px; cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  button:hover { background: rgba(122, 162, 255, 0.2); }
+  button.active { background: rgba(122, 162, 255, 0.3); border-color: var(--accent); }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { font-size: 10px; color: var(--text-dim); width: 64px; flex-shrink: 0; }
+  .row .val { font-size: 10px; color: var(--accent); width: 36px; text-align: right; flex-shrink: 0; }
+  input[type=range] {
+    flex: 1; -webkit-appearance: none; appearance: none; height: 3px;
+    background: var(--accent-dim); border-radius: 2px; outline: none; min-width: 0;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 11px; height: 11px;
+    border-radius: 50%; background: var(--accent); cursor: pointer;
+  }
+  .tools { display: flex; gap: 5px; }
+  .tools button { flex: 1; }
+  .toggles { display: flex; gap: 5px; }
+  .toggles button { flex: 1; }
+  #stats { margin-top: 12px; font-size: 10px; color: var(--text-dim); line-height: 1.7; }
+  #stats b { color: var(--text); font-weight: normal; }
+
+  #hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; color: var(--text-dim); letter-spacing: 1px;
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    padding: 7px 14px; border-radius: 8px; backdrop-filter: blur(12px);
+    white-space: nowrap; z-index: 10;
+  }
+  #hint b { color: var(--text); font-weight: normal; }
+
+  #toast {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; letter-spacing: 2px; color: var(--accent);
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    padding: 9px 18px; border-radius: 8px; backdrop-filter: blur(12px);
+    opacity: 0; transition: opacity 0.4s; pointer-events: none; z-index: 20;
+  }
+  @media (max-width: 640px) {
+    #panel { width: 200px; padding: 10px 12px; }
+    #hint { display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="space"></canvas>
+
+<div id="panel">
+  <h1>FABLE UNIVERSE</h1>
+  <div class="sub">REAL-TIME N-BODY GRAVITY &middot; BARNES-HUT</div>
+
+  <div class="section">SCENARIO</div>
+  <div class="presets">
+    <button data-preset="galaxy" class="active">Spiral Galaxy</button>
+    <button data-preset="collision">Galaxy Collision</button>
+    <button data-preset="solar">Solar System</button>
+    <button data-preset="cluster">Star Cluster</button>
+    <button data-preset="bigbang">Big Bang</button>
+    <button data-preset="binary">Binary Black Holes</button>
+  </div>
+
+  <div class="section">TIME</div>
+  <div class="row">
+    <label>Speed</label>
+    <input type="range" id="speed" min="0" max="300" value="100">
+    <span class="val" id="speedVal">1.0x</span>
+  </div>
+
+  <div class="section">TOOL &nbsp;<span style="letter-spacing:0">(left-drag)</span></div>
+  <div class="tools">
+    <button data-tool="pan" class="active">Pan</button>
+    <button data-tool="well">Gravity</button>
+    <button data-tool="bh">+ Black Hole</button>
+  </div>
+
+  <div class="section">VIEW</div>
+  <div class="toggles">
+    <button id="trailsBtn">Trails</button>
+    <button id="pauseBtn">Pause</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+
+  <div id="stats">
+    BODIES &nbsp;<b id="stBodies">0</b><br>
+    TIME &nbsp;&nbsp;&nbsp;<b id="stTime">0.0 Myr</b><br>
+    FPS &nbsp;&nbsp;&nbsp;&nbsp;<b id="stFps">--</b>
+  </div>
+</div>
+
+<div id="hint"><b>scroll</b> zoom &middot; <b>drag</b> pan &middot; <b>space</b> pause &middot; <b>t</b> trails &middot; <b>1-6</b> scenarios &middot; <b>r</b> reset</div>
+<div id="toast"></div>
+
+<script src="js/universe.js"></script>
+</body>
+</html>
