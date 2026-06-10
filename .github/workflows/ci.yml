@@ -12,5 +12,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Physics smoke test
+      - name: Core physics tests
+        run: node test/core.test.js
+      - name: Scenario smoke test
         run: node test/smoke.js
