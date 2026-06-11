@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>PhysicsWGPU harness</title></head>
+<body>
+<canvas id="c" width="64" height="64"></canvas>
+<script src="../js/core/bodies.js"></script>
+<script src="../js/core/octree.js"></script>
+<script src="../js/core/treepack.js"></script>
+<script src="../js/core/physics.js"></script>
+<script src="../js/webgpu/boot.js"></script>
+<script src="../js/webgpu/compute.js"></script>
+<script>
+// Same protocol as dev/gpu-harness.html, on the WebGPU engine:
+// circular two-body orbit accuracy, then burst + runtime-BH probes.
+// Result on window.__result; {skipped:true} when WebGPU is absent.
+(async () => {
+  const out = { ok: false, log: [] };
+  try {
+    const wgpu = await WGPU.boot(document.getElementById('c'));
+    if (!wgpu) { window.__result = { skipped: true, reason: 'no WebGPU adapter' }; return; }
+    if (!PhysicsWGPU.init(wgpu, { maxBodies: 1 << 16 })) {
+      throw new Error('PhysicsWGPU.init failed');
+    }
+    DarkMatter.on = false;
+    Object.assign(PhysicsWGPU.cfg, {
+      dt: 0.05, substeps: 1, softening: 0.5, captureRadius: 0.5,
+      timeScale: 1, paused: false, t: 0,
+    });
+
+    const M = 50000, R = 200;
+    const v = Math.sqrt(M / R);
+    Bodies.clear();
+    Bodies.add(0, 0, 0, 0, 0, 0, M, 5, 7, Bodies.TYPE_STAR, 'sun');
+    Bodies.add(R, 0, 0, 0, 0, v, 1, 1, 2, Bodies.TYPE_PLANET, 'p');
+    for (let i = 0; i < 100; i++) {
+      const a = Math.random() * 2 * Math.PI;
+      const r = 300 + Math.random() * 50;
+      const vv = Math.sqrt(M / r);
+      Bodies.add(r * Math.cos(a), 0, r * Math.sin(a),
+                 -vv * Math.sin(a), 0, vv * Math.cos(a),
+                 0.001, 0.5, 5, Bodies.TYPE_DUST, null);
+    }
+    PhysicsWGPU.upload();
+
+    // ~2 orbital periods; yield to the event loop so mapAsync resolves.
+    for (let s = 0; s < 3200; s++) {
+      PhysicsWGPU.frame();
+      if (s % 40 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+    for (let s = 0; s < 6; s++) {           // let the mirror catch up
+      PhysicsWGPU.frame();
+      await new Promise(r => setTimeout(r, 8));
+    }
+
+    const dx = Bodies.px[1] - Bodies.px[0];
+    const dy = Bodies.py[1] - Bodies.py[0];
+    const dz = Bodies.pz[1] - Bodies.pz[0];
+    const r = Math.hypot(dx, dy, dz);
+    out.radErr = Math.abs(r - R) / R;
+    out.finite = isFinite(r);
+    out.log.push(`orbit radius ${r.toFixed(2)} vs ${R} (err ${(out.radErr * 100).toFixed(2)}%)`);
+
+    PhysicsWGPU.addBurst(0, 0, 0, 0, 0, 0, 64);
+    const slot = PhysicsWGPU.addMassive(400, 0, 0, 0, 0, 0, 6000, 3, 8, Bodies.TYPE_BH);
+    for (let s = 0; s < 10; s++) {
+      PhysicsWGPU.frame();
+      await new Promise(r => setTimeout(r, 4));
+    }
+    out.burstOk = true;
+    out.bhSlot = slot;
+    out.log.push(`burst + runtime BH ok (slot ${slot})`);
+    out.ok = out.finite && out.radErr < 0.05 && slot >= 0;
+  } catch (e) {
+    out.error = e.message;
+  }
+  window.__result = out;
+})();
+</script>
+</body>
+</html>

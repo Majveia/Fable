@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FABLE UNIVERSE — WebGPU render harness</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #status { position: fixed; top: 8px; left: 10px; color: #8aa;
+            font: 12px monospace; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="status"></div>
+
+<script src="../js/webgpu/post.js"></script>
+<script src="../js/webgpu/render.js"></script>
+
+<script>
+(async function () {
+  const canvas = document.getElementById('c');
+  const status = document.getElementById('status');
+
+  // ---- test hooks (used by the Playwright check) ----
+  window.__frames = 0;
+  window.__ok = false;
+  window.__errors = [];
+  window.__trails = false;
+  window.__orbiting = true;
+  window.addEventListener('error', (e) => window.__errors.push(String(e.message)));
+
+  function fail(msg) {
+    status.textContent = msg;
+    window.__frames = -1;
+  }
+
+  /* ----------------------------------------------------------------
+     Minimal inline boot. js/webgpu/boot.js (WGPU.boot) is owned by
+     the compute agent and may not exist on this fork point, so the
+     harness boots WebGPU itself and hands RendererWGPU the same
+     { device, context, format } shape.
+     ---------------------------------------------------------------- */
+  if (!navigator.gpu) return fail('WebGPU unavailable: no navigator.gpu');
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) return fail('WebGPU unavailable: no adapter');
+  const device = await adapter.requestDevice();
+  const context = canvas.getContext('webgpu');
+  if (!context) return fail('WebGPU unavailable: no canvas context');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({ device, format, alphaMode: 'opaque' });
+  const wgpu = { device, context, format };
+
+  device.onuncapturederror = (e) =>
+    window.__errors.push(String((e.error && e.error.message) || e));
+  device.lost.then((info) => {
+    if (info.reason !== 'destroyed') window.__errors.push('device lost: ' + info.message);
+  });
+
+  const R = globalThis.RendererWGPU;
+  if (R.init(wgpu) !== 'webgpu') return fail('RendererWGPU.init failed');
+
+  function fit() {
+    R.resize(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
+  }
+  window.addEventListener('resize', fit);
+  fit();
+
+  /* ----------------------------------------------------------------
+     Synthetic scene as plain Float32Arrays -> GPUBuffers, using the
+     v5 vec4f slot layout (pos: xyz + alive>=0; vel: xyz + type;
+     attrib: rad, colorIdx, type, 0). Massive bodies first (slot
+     0 = BH, 1..3 = planets), then a tilted 5k-star disk, dust
+     lanes, and ~200 gas puffs.
+     ---------------------------------------------------------------- */
+  const TAU = Math.PI * 2;
+  function gauss() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+  }
+  function starColor() {
+    const u = Math.random();
+    if (u < 0.45) return 6;
+    if (u < 0.70) return 5;
+    if (u < 0.85) return 4;
+    if (u < 0.93) return 3;
+    if (u < 0.97) return 2;
+    if (u < 0.99) return 1;
+    return 0;
+  }
+  const TILT = 0.45, ct = Math.cos(TILT), st = Math.sin(TILT);
+  function tilted(x, y0, z0) {            // rotate disk about +X
+    return [x, y0 * ct - z0 * st, y0 * st + z0 * ct];
+  }
+
+  const COUNT = 4 + 5000 + 500 + 200;     // BH + planets | stars | dust | gas
+  const MASSIVE = 4;
+  const pos = new Float32Array(COUNT * 4);
+  const vel = new Float32Array(COUNT * 4);
+  const att = new Float32Array(COUNT * 4);
+  let slot = 0;
+  function add(x, y, z, rad, colorIdx, type) {
+    const o = slot * 4;
+    pos[o] = x; pos[o + 1] = y; pos[o + 2] = z; pos[o + 3] = 1; // alive
+    vel[o + 3] = type;
+    att[o] = rad; att[o + 1] = colorIdx; att[o + 2] = type; att[o + 3] = 0;
+    return slot++;
+  }
+
+  // massive set: one wandering black hole + three planets
+  add(430, 70, -140, 18, 8, 1);                       // BH 'maw'
+  add(170, 30, 90, 14, 5, 2);                         // planet 'amber'
+  add(-300, 60, 170, 22, 10, 2);                      // planet 'teal'
+  add(80, -20, -380, 28, 3, 2);                       // planet 'pearl'
+
+  // tilted disk of stars (4400) + central bulge (600)
+  for (let i = 0; i < 4400; i++) {
+    const r = 50 + 560 * Math.sqrt(Math.random());
+    const th = Math.random() * TAU;
+    const thick = 26 * Math.exp(-r / 500);
+    const [x, y, z] = tilted(r * Math.cos(th), gauss() * thick, r * Math.sin(th));
+    add(x, y, z, 1.0 + 2.6 * Math.pow(Math.random(), 2), starColor(), 0);
+  }
+  for (let i = 0; i < 600; i++) {
+    const [x, y, z] = tilted(gauss() * 60, gauss() * 38, gauss() * 60);
+    add(x, y, z, 1.2 + 2.2 * Math.random(), Math.random() < 0.5 ? 7 : starColor(), 0);
+  }
+  // dust lanes in the disk
+  for (let i = 0; i < 500; i++) {
+    const r = 120 + 480 * Math.sqrt(Math.random());
+    const th = Math.random() * TAU;
+    const [x, y, z] = tilted(r * Math.cos(th), gauss() * 8, r * Math.sin(th));
+    add(x, y, z, 1.4 + Math.random(), 11, 3);
+  }
+  // two gas clouds (nebulae)
+  for (let c = 0; c < 2; c++) {
+    const cr = 330, cth = c === 0 ? 0.8 : 3.6;
+    const [cx, cy, cz] = tilted(cr * Math.cos(cth), 0, cr * Math.sin(cth));
+    for (let i = 0; i < 100; i++) {
+      add(cx + gauss() * 85, cy + gauss() * 55, cz + gauss() * 85,
+          28 + 45 * Math.random(), c === 0 ? 9 : 10, 4);
+    }
+  }
+
+  function gpuBuf(data) {
+    const b = device.createBuffer({
+      size: data.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(b, 0, data);
+    return b;
+  }
+  R.setSource({
+    posBuf: gpuBuf(pos), velBuf: gpuBuf(vel), attribBuf: gpuBuf(att),
+    count: COUNT, massiveCount: MASSIVE,
+  });
+
+  // Bodies global mirror (always holds the massive set, slot-aligned)
+  // — the renderer painter-sorts planets/BHs from it.
+  globalThis.Bodies = {
+    n: MASSIVE,
+    px: new Float64Array([430, 170, -300, 80]),
+    py: new Float64Array([70, 30, 60, -20]),
+    pz: new Float64Array([-140, 90, 170, -380]),
+    type: new Uint8Array([1, 2, 2, 2]),
+  };
+
+  // lensing feed: the BH again, with a mass that reads at ~8% viewport
+  const blackHoles = [{ x: 430, y: 70, z: -140, mass: 80000, rad: 18 }];
+  const lightPos = { x: 0, y: 160, z: 40 };  // near galactic center
+
+  /* ----------------------------------------------------------------
+     Inline orbit camera — mat4 math copied from js/render/camera.js
+     (perspective fov 0.9 rad, near 0.1, far 1e6, lookAt up = +Y,
+     column-major).
+     ---------------------------------------------------------------- */
+  let yaw = 0.5, pitch = 0.42, dist = 1350;
+  const target = { x: 0, y: 0, z: 0 }, fov = 0.9;
+
+  function eyePos() {
+    const cp = Math.cos(pitch), sp = Math.sin(pitch);
+    const cy = Math.cos(yaw), sy = Math.sin(yaw);
+    return {
+      x: target.x + dist * cp * sy,
+      y: target.y + dist * sp,
+      z: target.z + dist * cp * cy,
+    };
+  }
+
+  function viewProj(aspect) {
+    const near = 0.1, far = 1e6;
+    const f = 1 / Math.tan(fov / 2), nf = 1 / (near - far);
+    const P = [
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, (far + near) * nf, -1,
+      0, 0, 2 * far * near * nf, 0,
+    ];
+    const e = eyePos(), t = target;
+    let bx = e.x - t.x, by = e.y - t.y, bz = e.z - t.z;
+    const bl = Math.hypot(bx, by, bz) || 1;
+    bx /= bl; by /= bl; bz /= bl;
+    let rx = bz, ry = 0, rz = -bx;
+    let rl = Math.hypot(rx, ry, rz);
+    if (rl < 1e-9) { rx = 1; ry = 0; rz = 0; rl = 1; }
+    rx /= rl; ry /= rl; rz /= rl;
+    const ux = by * rz - bz * ry;
+    const uy = bz * rx - bx * rz;
+    const uz = bx * ry - by * rx;
+    const V = [
+      rx, ux, bx, 0,
+      ry, uy, by, 0,
+      rz, uz, bz, 0,
+      -(rx * e.x + ry * e.y + rz * e.z),
+      -(ux * e.x + uy * e.y + uz * e.z),
+      -(bx * e.x + by * e.y + bz * e.z),
+      1,
+    ];
+    const out = new Float32Array(16);
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        out[c * 4 + r] =
+          P[r] * V[c * 4] +
+          P[4 + r] * V[c * 4 + 1] +
+          P[8 + r] * V[c * 4 + 2] +
+          P[12 + r] * V[c * 4 + 3];
+      }
+    }
+    return out;
+  }
+
+  window.__setView = function (y, p, d) { yaw = y; pitch = p; dist = d; };
+  window.__setTrails = function (on) { window.__trails = !!on; };
+  window.__setOrbiting = function (on) { window.__orbiting = !!on; };
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = now - last;
+    last = now;
+    if (window.__orbiting) yaw += 0.00012 * dt;   // slow auto-orbit
+    const aspect = canvas.width / Math.max(1, canvas.height);
+    R.render({
+      viewProj: viewProj(aspect),
+      eye: eyePos(),
+      lightPos,
+      trails: window.__trails,
+      timeMs: now,
+      blackHoles,
+      attribsVersion: 1,
+    });
+    window.__frames++;
+    if (window.__frames === 60 && window.__errors.length === 0) window.__ok = true;
+    if ((window.__frames & 15) === 0) {
+      status.textContent =
+        `webgpu | bodies ${COUNT} | frames ${window.__frames}` +
+        ` | errors ${window.__errors.length}` +
+        ` | yaw ${yaw.toFixed(2)} pitch ${pitch.toFixed(2)} dist ${dist.toFixed(0)}`;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // basic manual controls so the harness is usable by hand
+  let drag = null;
+  canvas.addEventListener('mousedown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
+  window.addEventListener('mouseup', () => { drag = null; });
+  window.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    yaw -= (e.clientX - drag.x) * 0.005;
+    pitch = Math.min(1.55, Math.max(-1.55, pitch + (e.clientY - drag.y) * 0.005));
+    drag.x = e.clientX; drag.y = e.clientY;
+  });
+  canvas.addEventListener('wheel', (e) => {
+    dist = Math.min(4e5, Math.max(0.5, dist * Math.exp(e.deltaY * 0.001)));
+    e.preventDefault();
+  }, { passive: false });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 't') window.__trails = !window.__trails;
+    if (e.key === 'o') window.__orbiting = !window.__orbiting;
+  });
+})();
+</script>
+</body>
+</html>

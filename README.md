@@ -2,11 +2,22 @@
 
 A real-time **3D** N-body universe in a single page of vanilla JavaScript.
 No frameworks, no build step, no dependencies. Open `index.html` — or visit
-the live deployment — and you're orbiting up to ~500,000 gravitating bodies.
+the live deployment — and you're orbiting up to **2 million** gravitating
+bodies (WebGPU), half a million (WebGL2), or tens of thousands (CPU) —
+the engine picks the best your browser offers and falls back gracefully.
 
 **Live: https://majveia.github.io/Fable/**
 
 ![Spiral galaxy with a lensing black hole at its core](docs/spiral-galaxy.png)
+
+**v5 — WebGPU compute:**
+- **WGSL compute engine** (`js/webgpu/`): the proven Barnes-Hut kernel as
+  a real compute shader over storage buffers — in-place integration (no
+  ping-pong), `mapAsync` staging-ring readback that never stalls, and a
+  WGSL renderer pulling positions straight from the physics buffers.
+  Capacity: **2,097,152 bodies**; the supercluster fills ~1.9M of them.
+- Boot chain: WebGPU → WebGL2 hybrid → CPU, automatic; the stat line
+  shows which engine you got. Same physics, same scenarios, same look.
 
 **v4 — deeper physics, deeper immersion:**
 - **DKD leapfrog integrator** (2nd-order symplectic) on both engines —
