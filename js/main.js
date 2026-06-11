@@ -1,30 +1,57 @@
 'use strict';
 /* ============================================================
-   FABLE UNIVERSE v3 — boot, engine select, loop, input, UI
+   FABLE UNIVERSE v5 — boot chain, engine select, loop, input, UI
+   Boot order: WebGPU (compute + WGSL renderer, up to 2M bodies)
+   -> WebGL2 hybrid (524k) -> CPU. A canvas claimed by WebGPU can
+   never open a WebGL context, so the fallback swaps in a fresh
+   canvas element.
    ============================================================ */
-(() => {
+(async () => {
 
-const canvas = document.getElementById('space');
-const mode = Renderer3D.init(canvas);
-if (!mode) {
-  document.getElementById('nogl').style.display = 'flex';
-  return;
+let canvas = document.getElementById('space');
+let renderer = null, engine = null, modeTag = 'cpu';
+let wgpuOK = false, gpuOK = false;
+let MAX_BODIES = Bodies.CAP;
+
+if (globalThis.WGPU && globalThis.PhysicsWGPU && globalThis.RendererWGPU) {
+  try {
+    const w = await WGPU.boot(canvas);
+    if (w) {
+      const cap = Math.min(w.maxBodiesCap || (1 << 21), 1 << 21);
+      if (PhysicsWGPU.init(w, { maxBodies: cap }) && RendererWGPU.init(w)) {
+        renderer = RendererWGPU; engine = PhysicsWGPU;
+        wgpuOK = true; modeTag = 'webgpu'; MAX_BODIES = cap;
+      }
+    }
+  } catch (e) { console.warn('WebGPU boot failed, falling back:', e); }
+  if (!wgpuOK) {
+    const fresh = canvas.cloneNode(false);
+    canvas.replaceWith(fresh);
+    canvas = fresh;
+  }
 }
 
-// GPU compute engine if float-texture rendering is available; the same
-// canvas context is shared (getContext returns the existing context).
-const MAX_GPU_BODIES = 1 << 19;
-const gl = canvas.getContext('webgl2');
-const gpuOK = !!(globalThis.PhysicsGPU && gl &&
-                 PhysicsGPU.init(gl, { maxBodies: MAX_GPU_BODIES }));
-const engine = gpuOK ? PhysicsGPU : Physics;
+if (!wgpuOK) {
+  const mode = Renderer3D.init(canvas);
+  if (!mode) {
+    document.getElementById('nogl').style.display = 'flex';
+    return;
+  }
+  renderer = Renderer3D;
+  const gl = canvas.getContext('webgl2');
+  gpuOK = !!(globalThis.PhysicsGPU && gl &&
+             PhysicsGPU.init(gl, { maxBodies: 1 << 19 }));
+  engine = gpuOK ? PhysicsGPU : Physics;
+  modeTag = gpuOK ? 'gpu' : 'cpu';
+  MAX_BODIES = gpuOK ? 1 << 19 : Bodies.CAP;
+}
 
 let W = 0, H = 0, DPR = 1;
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   W = window.innerWidth; H = window.innerHeight;
   canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-  Renderer3D.resize(W, H, DPR);
+  renderer.resize(W, H, DPR);
 }
 window.addEventListener('resize', resize);
 resize();
@@ -77,8 +104,19 @@ function loadScenario(i, seed) {
   Physics.cfg.timeScale = engine.cfg.timeScale; // keep user's speed setting
   Physics.cfg.theta2 = Physics.cfg.theta2Base;
   engine.clearPull();
-  const ret = sc.init({ gpu: gpuOK, maxBodies: gpuOK ? MAX_GPU_BODIES - 128 : Bodies.CAP }, seed);
-  if (gpuOK) {
+  const ret = sc.init({ gpu: wgpuOK || gpuOK,
+                        maxBodies: (wgpuOK || gpuOK) ? MAX_BODIES - 128 : Bodies.CAP }, seed);
+  if (wgpuOK) {
+    Object.assign(PhysicsWGPU.cfg, Physics.cfg);
+    PhysicsWGPU.upload();
+    RendererWGPU.setSource({
+      posBuf: PhysicsWGPU.posBuf,
+      velBuf: PhysicsWGPU.velBuf,
+      attribBuf: PhysicsWGPU.attribBuf,
+      count: PhysicsWGPU.count,
+      massiveCount: PhysicsWGPU.massiveCount,
+    });
+  } else if (gpuOK) {
     // Scenarios write Physics.cfg; mirror it into the GPU engine.
     Object.assign(PhysicsGPU.cfg, Physics.cfg);
     PhysicsGPU.upload();
@@ -89,7 +127,7 @@ function loadScenario(i, seed) {
       massiveCount: PhysicsGPU.massiveCount,
       staticAttribs: PhysicsGPU.staticAttribs,
     });
-  } else if (Renderer3D.setSource) {  // absent on pre-v3 renderers
+  } else if (Renderer3D.setSource) {
     Renderer3D.setSource({ mode: 'arrays' });
   }
   if (globalThis.Evolution) Evolution.reset(engine.evolutionView(), 42 + scenarioIdx);
@@ -130,8 +168,8 @@ function focalPoint(sx, sy) {
 
 function dropBlackHole(sx, sy) {
   const p = focalPoint(sx, sy);
-  if (gpuOK) {
-    if (PhysicsGPU.addMassive(p.x, p.y, p.z, 0, 0, 0, 6000, 3, 8, Bodies.TYPE_BH) < 0) {
+  if (engine.addMassive) {
+    if (engine.addMassive(p.x, p.y, p.z, 0, 0, 0, 6000, 3, 8, Bodies.TYPE_BH) < 0) {
       toast('NO FREE SLOTS'); return;
     }
   } else {
@@ -352,12 +390,12 @@ function frame(now) {
   }
 
   Camera3D.update(dtMs);
-  Renderer3D.render({
+  renderer.render({
     viewProj: Camera3D.viewProj(W / H),
     eye: Camera3D.eye(),
     lightPos, trails, timeMs: now,
     blackHoles: engine.blackHoleList(),
-    attribsVersion: gpuOK ? PhysicsGPU.attribsVersion : 0,
+    attribsVersion: engine.attribsVersion || 0,
   });
   requestAnimationFrame(frame);
 }
@@ -368,7 +406,7 @@ setInterval(() => {
   $('stat').textContent =
     engine.bodyCount().toLocaleString() + ' bodies · ' +
     engine.simTimeMyr().toFixed(1) + ' Myr · ' +
-    Math.round(fpsSmooth) + ' fps · ' + (gpuOK ? 'gpu' : 'cpu');
+    Math.round(fpsSmooth) + ' fps · ' + modeTag;
 }, 400);
 
 if (boot.dm !== undefined) DarkMatter.on = boot.dm !== '0';

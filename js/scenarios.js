@@ -175,8 +175,9 @@ const def = (key, label, fn) => Scenarios.list.push({
 def('galaxy', 'SPIRAL GALAXY', (budget = DEF_BUDGET) => {
   Object.assign(P().cfg, { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 });
   const g = budget.gpu;
+  const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;   // WebGPU tier
   makeGalaxy({ cx: 0, cy: 0, cz: 0, cvx: 0, cvy: 0, cvz: 0,
-    stars: g ? 12000 : 4600, dust: g ? 128000 : 9000, gas: g ? 5000 : 600,
+    stars: g ? 12000 : 4600, dust: g ? 128000 * X : 9000, gas: g ? 5000 * Math.min(X, 2) : 600,
     radius: 900, bhMass: 40000, tiltRad: 0.0, spinDir: 1 });
   return { camDist: 1500, lightPos: { x: 0, y: 0, z: 0 } };
 });
@@ -184,7 +185,8 @@ def('galaxy', 'SPIRAL GALAXY', (budget = DEF_BUDGET) => {
 def('collision', 'GALAXY COLLISION', (budget = DEF_BUDGET) => {
   Object.assign(P().cfg, { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 });
   const g = budget.gpu;
-  const stars = g ? 7000 : 2800, dust = g ? 85000 : 5600, gas = g ? 2600 : 380;
+  const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
+  const stars = g ? 7000 : 2800, dust = g ? 85000 * X : 5600, gas = g ? 2600 * Math.min(X, 2) : 380;
   makeGalaxy({ cx: -750, cy: -80, cz: -260, cvx: 2.4, cvy: 0.2, cvz: 0.9,
     stars, dust, gas, radius: 600, bhMass: 26000,
     tiltRad: 0.15, azimuthRad: 0.4, spinDir: 1 });
@@ -255,25 +257,26 @@ def('solar', 'SOLAR SYSTEM', (budget = DEF_BUDGET) => {
   }
 
   // Saturn's rings: dust on tight circular orbits inside its Hill sphere.
-  for (let i = 0; i < (g ? 5000 : 1400); i++) {
+  const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
+  for (let i = 0; i < (g ? 5000 * X : 1400); i++) {
     const rr = rand(8.5, 14);
     const s = orbit(rr, 26.7 + gauss() * 0.4, 1.0, rand(0, 6.28), 1, planetState.Saturn);
     bodies.add(s[0], s[1], s[2], s[3], s[4], s[5], 1e-6, rand(0.25, 0.5), 11, TYPE_DUST, null);
   }
 
   // Main asteroid belt: low inclination scatter.
-  for (let i = 0; i < (g ? 20000 : 5000); i++) {
+  for (let i = 0; i < (g ? 20000 * X : 5000); i++) {
     const a = rand(215, 320);
     const s = orbit(a, Math.abs(gauss()) * 8, rand(0, 6.28), rand(0, 6.28), rand(0.97, 1.03));
     bodies.add(s[0], s[1], s[2], s[3], s[4], s[5], 0.001, rand(0.3, 0.7), 5, TYPE_DUST, null);
   }
   // Kuiper belt + scattered disc.
-  for (let i = 0; i < (g ? 15000 : 3600); i++) {
+  for (let i = 0; i < (g ? 15000 * X : 3600); i++) {
     const a = rand(960, 1200);
     const s = orbit(a, Math.abs(gauss()) * 15, rand(0, 6.28), rand(0, 6.28), rand(0.97, 1.03));
     bodies.add(s[0], s[1], s[2], s[3], s[4], s[5], 0.001, rand(0.3, 0.7), 2, TYPE_DUST, null);
   }
-  for (let i = 0; i < (g ? 3000 : 700); i++) {
+  for (let i = 0; i < (g ? 3000 * X : 700); i++) {
     const a = rand(1000, 1500);
     const s = orbit(a, Math.abs(gauss()) * 32, rand(0, 6.28), rand(0, 6.28), rand(0.72, 0.92));
     bodies.add(s[0], s[1], s[2], s[3], s[4], s[5], 0.001, rand(0.3, 0.7), 1, TYPE_DUST, null);
@@ -293,6 +296,7 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
   // Gaussian-mixture molecular cloud: dense cores seeded with mass so the
   // gas genuinely collapses onto them — star formation in miniature.
   const g = budget.gpu;
+  const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
   const CLUMPS = 7;
   const cores = [];
   for (let k = 0; k < CLUMPS; k++) {
@@ -326,7 +330,7 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
     const c = cores[(_rng() * CLUMPS) | 0];
     return [c.x + gauss() * c.s * 2.6, c.y + gauss() * c.s * 1.6, c.z + gauss() * c.s * 2.6];
   };
-  for (let i = 0; i < (g ? 9000 : 1100); i++) {
+  for (let i = 0; i < (g ? 9000 * Math.min(X, 2) : 1100); i++) {
     const [x, y, z] = sample();
     const d = Math.hypot(x, y, z) + 1;
     const v = Math.sqrt(totalM / Math.max(d, 200)) * 0.25;
@@ -334,7 +338,7 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
       -x / d * v + gauss() * 0.4, -y / d * v + gauss() * 0.4, -z / d * v + gauss() * 0.4,
       0.001, rand(10, 26), _rng() < 0.55 ? 9 : 10, TYPE_GAS, null);
   }
-  for (let i = 0; i < (g ? 60000 : 9000); i++) {
+  for (let i = 0; i < (g ? 60000 * X : 9000); i++) {
     const [x, y, z] = sample();
     const d = Math.hypot(x, y, z) + 1;
     const v = Math.sqrt(totalM / Math.max(d, 200)) * 0.3;
@@ -349,6 +353,7 @@ def('cluster', 'GLOBULAR CLUSTER', (budget = DEF_BUDGET) => {
   Object.assign(P().cfg, { dt: 0.25, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 });
   const bodies = B();
   const g = budget.gpu;
+  const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
   const N = g ? 14000 : 6000, a = 220, starM = 1.5, M = N * starM;
   const put = (count, mass, radLo, radHi, type) => {
     for (let i = 0; i < count; i++) {
@@ -367,7 +372,7 @@ def('cluster', 'GLOBULAR CLUSTER', (budget = DEF_BUDGET) => {
     }
   };
   put(N, starM, 0.7, 1.9, TYPE_STAR);
-  put(g ? 72000 : 6000, 0.001, 0.3, 0.7, TYPE_DUST);
+  put(g ? 72000 * X : 6000, 0.001, 0.3, 0.7, TYPE_DUST);
   return { camDist: 1100, lightPos: { x: 0, y: 0, z: 0 } };
 });
 
@@ -376,6 +381,7 @@ def('bigbang', 'BIG BANG', (budget = DEF_BUDGET) => {
   const bodies = B();
   // Near-critical 3D Hubble flow; primordial noise seeds filaments.
   const g = budget.gpu;
+  const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
   const H0 = 0.42, R = 60;
   const put = (count, mass, radLo, radHi, type, colorFn) => {
     for (let i = 0; i < count; i++) {
@@ -388,8 +394,8 @@ def('bigbang', 'BIG BANG', (budget = DEF_BUDGET) => {
     }
   };
   put(g ? 12000 : 6500, 2.2, 0.6, 1.6, TYPE_STAR, starColor);
-  put(g ? 128000 : 11000, 0.001, 0.3, 0.7, TYPE_DUST, () => 11);
-  put(g ? 5000 : 700, 0.001, 14, 30, TYPE_GAS, () => (_rng() < 0.5 ? 9 : 10));
+  put(g ? 128000 * X : 11000, 0.001, 0.3, 0.7, TYPE_DUST, () => 11);
+  put(g ? 5000 * Math.min(X, 2) : 700, 0.001, 14, 30, TYPE_GAS, () => (_rng() < 0.5 ? 9 : 10));
   return { camDist: 900, lightPos: { x: 0, y: 0, z: 0 } };
 });
 
@@ -403,7 +409,7 @@ def('supercluster', 'SUPERCLUSTER', (budget = DEF_BUDGET) => {
   const NGAL = g ? 52 : 45;
   // Per-galaxy populations sized to the mode's body budget (makeGalaxy
   // adds ~1.18x stars as massive plus the dust/gas/halo tracers).
-  const target = g ? Math.min(budget.maxBodies * 0.92, 500000) : 25000;
+  const target = g ? budget.maxBodies * 0.92 : 25000;
   const perGal = Math.floor(target / NGAL);
   const stars = g ? 320 : Math.max(120, Math.floor(perGal * 0.40));
   const dust = g ? Math.max(0, perGal - Math.floor(stars * 1.18) - 9) : Math.floor(perGal * 0.52);
@@ -438,8 +444,9 @@ def('supercluster', 'SUPERCLUSTER', (budget = DEF_BUDGET) => {
 def('binary', 'BINARY BLACK HOLES', (budget = DEF_BUDGET) => {
   Object.assign(P().cfg, { dt: 0.22, substeps: 1, softening: 5, captureRadius: 6, myrPerT: 0.5 });
   const g = budget.gpu;
+  const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
   const m = 22000, d = 560;
-  const st = g ? 5000 : 2600, du = g ? 50000 : 5200, ga = g ? 2000 : 300;
+  const st = g ? 5000 : 2600, du = g ? 50000 * X : 5200, ga = g ? 2000 * Math.min(X, 2) : 300;
   const v = Math.sqrt(1.6 * m / (2 * d));   // each side carries its disk (1.6m total)
   makeGalaxy({ cx: -d / 2, cy: 0, cz: 0, cvx: 0, cvy: v * 0.25, cvz: v,
     stars: st, dust: du, gas: ga, radius: 240, bhMass: m,

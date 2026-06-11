@@ -35,3 +35,18 @@ jobs:
           npx playwright install --with-deps chromium
       - name: GPU engine in headless Chromium
         run: node test/gpu.browser.test.js
+
+  webgpu-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Playwright Chromium
+        run: |
+          npm init -y > /dev/null
+          npm install playwright@1.56.1 > /dev/null
+          npx playwright install --with-deps chromium
+      - name: WebGPU engine (self-skips without an adapter)
+        run: node test/wgpu.browser.test.js
