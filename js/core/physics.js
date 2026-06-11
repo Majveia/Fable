@@ -143,6 +143,30 @@
       if (fps < 45) c.theta2 = Math.min(c.theta2 * 1.02, 2.25);
       else if (fps > 55) c.theta2 = Math.max(c.theta2 * 0.99, c.theta2Base);
     },
+
+    // ---- common engine surface (shared with PhysicsGPU, see v3 contract)
+    bodyCount() { return globalThis.Bodies.n; },
+    simTimeMyr() { return this.cfg.t * this.cfg.myrPerT; },
+
+    evolutionView() {
+      const B = globalThis.Bodies;
+      return {
+        get n() { return B.n; },
+        mass: B.mass, rad: B.rad, colorIdx: B.colorIdx, type: B.type,
+        setDirty() {},   // arrays mode re-reads Bodies every frame anyway
+      };
+    },
+
+    blackHoleList() {
+      const B = globalThis.Bodies;
+      const out = [];
+      for (let i = 0; i < B.n; i++) {
+        if (B.type[i] !== B.TYPE_BH) continue;
+        out.push({ x: B.px[i], y: B.py[i], z: B.pz[i], mass: B.mass[i], rad: B.rad[i] });
+      }
+      out.sort((a, b) => b.mass - a.mass);
+      return out.slice(0, 8);
+    },
   };
 
   globalThis.Physics = Physics;

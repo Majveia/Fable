@@ -14,5 +14,9 @@ jobs:
           node-version: 22
       - name: Core physics tests
         run: node test/core.test.js
+      - name: Tree flattening tests
+        run: node test/treepack.test.js
+      - name: Stellar evolution tests
+        run: node test/evolution.test.js
       - name: Scenario smoke test
         run: node test/smoke.js

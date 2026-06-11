@@ -1,6 +1,6 @@
 'use strict';
 /* ============================================================
-   FABLE UNIVERSE v2 — boot, loop, input, minimal UI
+   FABLE UNIVERSE v3 — boot, engine select, loop, input, UI
    ============================================================ */
 (() => {
 
@@ -10,6 +10,14 @@ if (!mode) {
   document.getElementById('nogl').style.display = 'flex';
   return;
 }
+
+// GPU compute engine if float-texture rendering is available; the same
+// canvas context is shared (getContext returns the existing context).
+const MAX_GPU_BODIES = 1 << 19;
+const gl = canvas.getContext('webgl2');
+const gpuOK = !!(globalThis.PhysicsGPU && gl &&
+                 PhysicsGPU.init(gl, { maxBodies: MAX_GPU_BODIES }));
+const engine = gpuOK ? PhysicsGPU : Physics;
 
 let W = 0, H = 0, DPR = 1;
 function resize() {
@@ -27,6 +35,8 @@ let lightPos = { x: 0, y: 0, z: 0 };
 let scenarioIdx = 0;
 let fpsSmooth = 60;
 let pulling = false;
+let lastSimT = 0;        // evolution clock, in sim-t units
+let frameNo = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -43,9 +53,26 @@ function loadScenario(i) {
   const sc = Scenarios.list[scenarioIdx];
   Bodies.clear();
   Physics.cfg.t = 0;
+  Physics.cfg.timeScale = engine.cfg.timeScale; // keep user's speed setting
   Physics.cfg.theta2 = Physics.cfg.theta2Base;
-  Physics.clearPull();
-  const ret = sc.init();
+  engine.clearPull();
+  const ret = sc.init({ gpu: gpuOK, maxBodies: gpuOK ? MAX_GPU_BODIES - 128 : Bodies.CAP });
+  if (gpuOK) {
+    // Scenarios write Physics.cfg; mirror it into the GPU engine.
+    Object.assign(PhysicsGPU.cfg, Physics.cfg);
+    PhysicsGPU.upload();
+    Renderer3D.setSource({
+      mode: 'texture',
+      posTex: PhysicsGPU.posTex,
+      count: PhysicsGPU.count,
+      massiveCount: PhysicsGPU.massiveCount,
+      staticAttribs: PhysicsGPU.staticAttribs,
+    });
+  } else if (Renderer3D.setSource) {  // absent on pre-v3 renderers
+    Renderer3D.setSource({ mode: 'arrays' });
+  }
+  if (globalThis.Evolution) Evolution.reset(engine.evolutionView(), 42 + scenarioIdx);
+  lastSimT = 0;
   lightPos = ret.lightPos || { x: 0, y: 0, z: 0 };
   Camera3D.setGoal({ targetX: 0, targetY: 0, targetZ: 0,
                      dist: ret.camDist, yaw: -0.7, pitch: 0.42 });
@@ -63,7 +90,6 @@ function focalPoint(sx, sy) {
   let fx = t.x - eye.x, fy = t.y - eye.y, fz = t.z - eye.z;
   const fl = Math.hypot(fx, fy, fz) || 1;
   fx /= fl; fy /= fl; fz /= fl;
-  // right = forward × up(0,1,0), up' = right × forward
   let rx = fz, ry = 0, rz = -fx;
   const rl = Math.hypot(rx, ry, rz) || 1;
   rx /= rl; ry /= rl; rz /= rl;
@@ -71,13 +97,25 @@ function focalPoint(sx, sy) {
   const tanF = Math.tan((Camera3D.fov || 0.96) / 2);
   const ndx = (2 * sx / W - 1) * tanF * (W / H);
   const ndy = (1 - 2 * sy / H) * tanF;
-  let dx = fx + rx * ndx - ux * ndy;   // up' points down-screen; flip
+  let dx = fx + rx * ndx - ux * ndy;
   let dy = fy + ry * ndx - uy * ndy;
   let dz = fz + rz * ndx - uz * ndy;
   const dl = Math.hypot(dx, dy, dz);
   dx /= dl; dy /= dl; dz /= dl;
   const D = Camera3D.dist;
   return { x: eye.x + dx * D, y: eye.y + dy * D, z: eye.z + dz * D };
+}
+
+function dropBlackHole(sx, sy) {
+  const p = focalPoint(sx, sy);
+  if (gpuOK) {
+    if (PhysicsGPU.addMassive(p.x, p.y, p.z, 0, 0, 0, 6000, 3, 8, Bodies.TYPE_BH) < 0) {
+      toast('NO FREE SLOTS'); return;
+    }
+  } else {
+    Bodies.add(p.x, p.y, p.z, 0, 0, 0, 6000, 3, 8, Bodies.TYPE_BH, null);
+  }
+  toast('BLACK HOLE');
 }
 
 // ------------------------------------------------------------ pointer input
@@ -144,20 +182,15 @@ window.addEventListener('keydown', (e) => {
   wake();
   if (e.repeat && e.key !== '[' && e.key !== ']') return;
   switch (e.key) {
-    case ' ': e.preventDefault(); Physics.cfg.paused = !Physics.cfg.paused;
-      toast(Physics.cfg.paused ? 'PAUSED' : 'RESUMED'); break;
+    case ' ': e.preventDefault(); engine.cfg.paused = !engine.cfg.paused;
+      toast(engine.cfg.paused ? 'PAUSED' : 'RESUMED'); break;
     case 't': trails = !trails; toast(trails ? 'TRAILS ON' : 'TRAILS OFF'); break;
     case 'r': loadScenario(scenarioIdx); break;
-    case '[': Physics.cfg.timeScale = Math.max(0, +(Physics.cfg.timeScale - 0.1).toFixed(1));
-      toast('TIME ' + Physics.cfg.timeScale.toFixed(1) + 'x'); break;
-    case ']': Physics.cfg.timeScale = Math.min(3, +(Physics.cfg.timeScale + 0.1).toFixed(1));
-      toast('TIME ' + Physics.cfg.timeScale.toFixed(1) + 'x'); break;
-    case 'b': {
-      const p = focalPoint(ptr.x || W / 2, ptr.y || H / 2);
-      Bodies.add(p.x, p.y, p.z, 0, 0, 0, 6000, 3, 8, Bodies.TYPE_BH, null);
-      toast('BLACK HOLE');
-      break;
-    }
+    case '[': engine.cfg.timeScale = Math.max(0, +(engine.cfg.timeScale - 0.1).toFixed(1));
+      toast('TIME ' + engine.cfg.timeScale.toFixed(1) + 'x'); break;
+    case ']': engine.cfg.timeScale = Math.min(3, +(engine.cfg.timeScale + 0.1).toFixed(1));
+      toast('TIME ' + engine.cfg.timeScale.toFixed(1) + 'x'); break;
+    case 'b': dropBlackHole(ptr.x || W / 2, ptr.y || H / 2); break;
     case 'g': pulling = true; break;
     case 'h': case '?': $('help').classList.toggle('show'); break;
     case 'f':
@@ -173,7 +206,7 @@ window.addEventListener('keydown', (e) => {
   }
 });
 window.addEventListener('keyup', (e) => {
-  if (e.key === 'g') { pulling = false; Physics.clearPull(); }
+  if (e.key === 'g') { pulling = false; engine.clearPull(); }
 });
 
 // ------------------------------------------------------------ idle fade
@@ -200,28 +233,40 @@ function frame(now) {
   const dtMs = Math.min(now - last, 50);
   last = now;
   fpsSmooth += (1000 / Math.max(dtMs, 1) - fpsSmooth) * 0.05;
+  frameNo++;
 
   if (pulling) {
     const p = focalPoint(ptr.x || W / 2, ptr.y || H / 2);
-    Physics.setPull(p.x, p.y, p.z, 30000);
+    engine.setPull(p.x, p.y, p.z, 30000);
   }
 
-  Physics.frame();
-  Physics.adaptQuality(fpsSmooth);
+  engine.frame();
+  engine.adaptQuality(fpsSmooth);
+
+  // Stellar evolution: every 10 frames, advance by accumulated sim-Myr.
+  if (globalThis.Evolution && frameNo % 10 === 0 && !engine.cfg.paused) {
+    const t = engine.cfg.t;
+    const dtMyr = (t - lastSimT) * engine.cfg.myrPerT;
+    lastSimT = t;
+    if (dtMyr > 0) Evolution.step(engine.evolutionView(), dtMyr);
+  }
+
   Camera3D.update(dtMs);
   Renderer3D.render({
     viewProj: Camera3D.viewProj(W / H),
     eye: Camera3D.eye(),
     lightPos, trails, timeMs: now,
+    blackHoles: engine.blackHoleList(),
+    attribsVersion: gpuOK ? PhysicsGPU.attribsVersion : 0,
   });
   requestAnimationFrame(frame);
 }
 
 setInterval(() => {
   $('stat').textContent =
-    Bodies.n.toLocaleString() + ' bodies · ' +
-    (Physics.cfg.t * Physics.cfg.myrPerT).toFixed(1) + ' Myr · ' +
-    Math.round(fpsSmooth) + ' fps';
+    engine.bodyCount().toLocaleString() + ' bodies · ' +
+    engine.simTimeMyr().toFixed(1) + ' Myr · ' +
+    Math.round(fpsSmooth) + ' fps · ' + (gpuOK ? 'gpu' : 'cpu');
 }, 400);
 
 loadScenario(0);
