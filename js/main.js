@@ -13,7 +13,18 @@ let renderer = null, engine = null, modeTag = 'cpu';
 let wgpuOK = false, gpuOK = false;
 let MAX_BODIES = Bodies.CAP;
 
-if (globalThis.WGPU && globalThis.PhysicsWGPU && globalThis.RendererWGPU) {
+// Self-healing: if the WebGPU path ever failed on this device, a flag
+// was set and we skip it entirely (the canvas would already be claimed,
+// so recovery from a mid-flight failure is a reload into WebGL).
+let noWebGPU = false;
+try { noWebGPU = sessionStorage.getItem('fable-no-webgpu') === '1'; } catch {}
+function bailToWebGL(e) {
+  console.warn('WebGPU path failed — reloading into WebGL:', e);
+  try { sessionStorage.setItem('fable-no-webgpu', '1'); } catch {}
+  location.reload();
+}
+
+if (!noWebGPU && globalThis.WGPU && globalThis.PhysicsWGPU && globalThis.RendererWGPU) {
   try {
     const w = await WGPU.boot(canvas);
     if (w) {
@@ -21,6 +32,7 @@ if (globalThis.WGPU && globalThis.PhysicsWGPU && globalThis.RendererWGPU) {
       if (PhysicsWGPU.init(w, { maxBodies: cap }) && RendererWGPU.init(w)) {
         renderer = RendererWGPU; engine = PhysicsWGPU;
         wgpuOK = true; modeTag = 'webgpu'; MAX_BODIES = cap;
+        Bodies.ensureCap(cap);
       }
     }
   } catch (e) { console.warn('WebGPU boot failed, falling back:', e); }
@@ -54,7 +66,21 @@ function resize() {
   renderer.resize(W, H, DPR);
 }
 window.addEventListener('resize', resize);
-resize();
+
+// WebGPU probation: until the new path has survived its first ~3 s of
+// real frames on this device, ANY error reloads into the proven WebGL
+// path. Unexecuted-driver-combination insurance.
+let probation = wgpuOK;
+if (probation) {
+  window.addEventListener('error', (e) => { if (probation) bailToWebGL(e.error || e.message); });
+  window.addEventListener('unhandledrejection', (e) => { if (probation) bailToWebGL(e.reason); });
+}
+try {
+  resize();
+} catch (e) {
+  if (probation) { bailToWebGL(e); return; }
+  throw e;
+}
 
 // ------------------------------------------------------------ state
 let trails = false;
@@ -354,6 +380,24 @@ function frame(now) {
     engine.setPull(p.x, p.y, p.z, 30000);
   }
 
+  if (probation) {
+    try {
+      engine.frame();
+      renderer.render({
+        viewProj: Camera3D.viewProj(W / H),
+        eye: Camera3D.eye(),
+        lightPos, trails, timeMs: now,
+        blackHoles: engine.blackHoleList(),
+        attribsVersion: engine.attribsVersion || 0,
+      });
+      if (frameNo > 180) probation = false;       // survived: trust it
+    } catch (e) { bailToWebGL(e); return; }
+    Camera3D.update(dtMs);
+    engine.adaptQuality(fpsSmooth);
+    requestAnimationFrame(frame);
+    return;
+  }
+
   engine.frame();
   engine.adaptQuality(fpsSmooth);
 
@@ -412,6 +456,11 @@ setInterval(() => {
 if (boot.dm !== undefined) DarkMatter.on = boot.dm !== '0';
 if (boot.ts !== undefined) engine.cfg.timeScale = Math.max(0, Math.min(3, +boot.ts || 1));
 const bootIdx = Math.max(0, Scenarios.list.findIndex(sc => sc.key === boot.s));
-loadScenario(bootIdx, boot.seed !== undefined ? (+boot.seed >>> 0) : undefined);
+try {
+  loadScenario(bootIdx, boot.seed !== undefined ? (+boot.seed >>> 0) : undefined);
+} catch (e) {
+  if (probation) { bailToWebGL(e); return; }
+  throw e;
+}
 requestAnimationFrame(frame);
 })();

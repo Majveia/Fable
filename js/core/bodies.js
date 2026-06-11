@@ -6,7 +6,7 @@
    ============================================================ */
 
 (function () {
-  const CAP = 1 << 19;   // GPU mode stages up to 524k bodies here before upload
+  let CAP = 1 << 19;     // grown on demand by ensureCap (WebGPU stages 2M)
 
   const Bodies = {
     // -------- type constants (shared contract) --------
@@ -56,6 +56,26 @@
       this.type[i] = this.type[last];
       this.names[i] = this.names[last];
       this.names[last] = null;
+    },
+
+    /* Grow capacity in place (WebGPU mode stages up to 2M bodies).
+       Typed arrays are reallocated and copied; indices are preserved. */
+    ensureCap(n) {
+      if (n <= this.CAP) return;
+      let cap = this.CAP;
+      while (cap < n) cap *= 2;
+      const grow = (old, T) => { const a = new T(cap); a.set(old); return a; };
+      this.px = grow(this.px, Float64Array); this.py = grow(this.py, Float64Array);
+      this.pz = grow(this.pz, Float64Array); this.vx = grow(this.vx, Float64Array);
+      this.vy = grow(this.vy, Float64Array); this.vz = grow(this.vz, Float64Array);
+      this.mass = grow(this.mass, Float64Array);
+      this.rad = grow(this.rad, Float32Array);
+      this.colorIdx = grow(this.colorIdx, Uint8Array);
+      this.type = grow(this.type, Uint8Array);
+      const names = new Array(cap).fill(null);
+      for (let i = 0; i < this.n; i++) names[i] = this.names[i];
+      this.names = names;
+      this.CAP = cap; CAP = cap;
     },
 
     clear() {
