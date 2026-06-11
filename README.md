@@ -1,70 +1,71 @@
 # FABLE UNIVERSE
 
-A real-time, interactive N-body universe simulator in a single page of vanilla
-JavaScript. No frameworks, no build step, no dependencies — open
-`index.html` and you're holding ~10,000 gravitating bodies.
+A real-time **3D** N-body universe in a single page of vanilla JavaScript.
+No frameworks, no build step, no dependencies. Open `index.html` — or visit
+the live deployment — and you're orbiting ~18,000 gravitating bodies.
 
-![Galaxy collision with trails enabled](docs/galaxy-collision.png)
+**Live: https://majveia.github.io/Fable/**
 
-## Run it
-
-```sh
-# any of these
-open index.html                # macOS
-xdg-open index.html            # Linux
-python3 -m http.server 8000    # then visit http://localhost:8000
-```
+![Spiral galaxy seen edge-on](docs/spiral-galaxy.png)
 
 ## What's inside
 
-Every star, planet, and black hole attracts every other body through real
-Newtonian gravity. Brute force would be O(n²) — hopeless at this scale — so
-forces are solved with a **Barnes-Hut quadtree** (O(n log n)), the same
-algorithm used in astrophysics research codes: distant clusters of stars are
-approximated by their center of mass, controlled by an opening angle θ that
-the simulator adapts at runtime to hold the frame rate.
+Every star, planet, dust grain, and black hole attracts every massive body
+through Newtonian gravity, solved with a **Barnes-Hut octree** (O(n log n)) —
+the same family of algorithm used in astrophysics research codes. Massless
+tracers (dust, gas) ride the gravitational field of the massive bodies and
+are kicked on alternating steps with a doubled timestep (subcycling), which
+halves their cost with no first-order trajectory change. The opening angle
+adapts at runtime to hold the frame rate on any machine.
+
+Rendering is WebGL2: perspective point sprites with GPU glow, volumetric
+gas billboards, sphere impostors for planets (real day/night terminator from
+the scene light), black holes with halos, and a far starfield sphere for
+parallax. The interface is deliberately minimal — everything fades away
+after three seconds and leaves you alone with the universe.
 
 | Scenario | What you'll see |
 |---|---|
-| **Spiral Galaxy** | 9,000 stars on an exponential disk around a supermassive black hole; arms wind, shear, and fragment like a real flocculent galaxy |
-| **Galaxy Collision** | Two galaxies merge — tidal tails, bridge formation, core coalescence |
-| **Solar System** | The eight planets plus asteroid and Kuiper belts on Keplerian orbits |
-| **Star Cluster** | A Plummer-sphere globular cluster relaxing under self-gravity |
-| **Big Bang** | Near-critical Hubble expansion; primordial noise collapses into filaments and clumps |
-| **Binary Black Holes** | Two black holes orbit their barycenter while shredding and feeding on their accretion disks |
+| **Spiral Galaxy** | Exponential thin disk + central bulge + stellar halo + dust lanes + arm gas, around a supermassive black hole |
+| **Galaxy Collision** | Two galaxies on inclined planes merge: tidal tails, bridges, core coalescence |
+| **Solar System** | Eight planets with true orbital inclinations, **Saturn's rings as particles orbiting inside its Hill sphere**, asteroid belt, Kuiper belt, scattered disc, comets |
+| **Stellar Nursery** | A collapsing molecular cloud with embedded newborn star clusters |
+| **Globular Cluster** | A 3D Plummer sphere relaxing under self-gravity |
+| **Big Bang** | Near-critical Hubble expansion collapsing into filaments |
+| **Binary Black Holes** | Two black holes orbiting their barycenter, shredding accretion disks on *different* orbital planes |
 
-### Physics details
-
-- Symplectic (semi-implicit) Euler integration with Plummer softening
-- Circular velocities from enclosed-mass profiles, so disks start in
-  near-equilibrium rotation
-- Black holes swallow bodies that cross the capture radius, conserving mass
-  and momentum
-- Star colors sampled from a realistic stellar population (mostly cool
-  red/orange dwarfs, rare blue giants)
+![Solar system](docs/solar-system.png)
+![Stellar nursery](docs/stellar-nursery.png)
 
 ## Controls
 
 | Input | Action |
 |---|---|
-| drag | pan |
-| scroll | zoom (about the cursor) |
-| **Gravity** tool + hold | pull stars toward the cursor |
-| **+ Black Hole** tool + click | drop a black hole and watch it feed |
+| drag | orbit |
+| shift-drag / right-drag | pan |
+| scroll / pinch | zoom |
+| `1`–`7` or `←` `→` | scenarios |
 | `space` | pause |
+| `[` `]` | time speed |
 | `t` | motion trails |
-| `1`–`6` | switch scenario |
-| `r` | reset scenario |
+| `b` | drop a black hole at the cursor |
+| `g` (hold) | gravity well at the cursor |
+| `r` | reset · `f` fullscreen · `h` help |
 
-![Solar system scenario](docs/solar-system.png)
+## Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Plain script-tag modules:
+DOM-free physics core (`js/core/`) that runs headless in Node, a WebGL2
+render layer (`js/render/`), scenario definitions, and a thin main loop.
 
 ## Tests
 
-A headless smoke test stubs the DOM, loads the real simulator source, and
-drives every scenario for 300 steps, checking numerical stability (no
-NaN/Infinity), boundedness (no explosions), per-step performance, momentum
-drift, and black-hole accretion:
-
 ```sh
-node test/smoke.js
+node test/core.test.js   # octree vs brute-force accuracy (1e-15 exact-mode),
+                         # orbit stability, tracer semantics, accretion
+                         # conservation, performance budget
+node test/smoke.js       # every scenario, 300 steps: stability, boundedness,
+                         # per-step budget, massive-only tree builds
 ```
+
+Both run in CI on every push; deployment to GitHub Pages is automatic.

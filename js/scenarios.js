@@ -72,10 +72,12 @@ function makeGalaxy(opts) {
     return bhMass + diskMass * (1 - Math.exp(-t) * (1 + t));
   };
 
-  const place = (count, mass, radLo, radHi, color, type, armTight, zMul, alphaJitter) => {
+  // color: palette index, -1 = stellar population, -2 = nebula hue (per particle)
+  const place = (count, mass, radLo, radHi, color, type, armTight, zMul, rMin) => {
+    const lo = Math.max(innerR, rMin || 0);
     for (let i = 0; i < count; i++) {
       let r = -Math.log(1 - Math.random()) * scale;
-      r = Math.max(innerR, Math.min(r, radius));
+      r = Math.max(lo, Math.min(r, radius));
       const arm = (i % arms) * (2 * Math.PI / arms);
       const theta = arm + (r / radius) * 3.2 * spinDir + gauss() * armTight + Math.random() * 0.25;
       const z = gauss() * zScale * zMul;
@@ -87,18 +89,20 @@ function makeGalaxy(opts) {
       const tvx = (-ux * st + vx_ * ct) * spinDir * v;
       const tvy = (-uy * st + vy_ * ct) * spinDir * v;
       const tvz = (-uz * st + vz_ * ct) * spinDir * v;
-      const c = color === -1 ? starColor() : color;
+      const c = color === -1 ? starColor()
+              : color === -2 ? (Math.random() < 0.5 ? 9 : 10)
+              : color;
       bodies.add(x, y, zz, cvx + tvx, cvy + tvy, cvz + tvz,
                  mass, rand(radLo, radHi), c, type, null);
-      void alphaJitter;
     }
   };
 
   place(stars, starMass, 0.7, 1.9, -1, TYPE_STAR, 0.50, 1.0);
   // Dust lanes hug the arms more tightly than stars do.
   place(dust, 0.001, 0.3, 0.8, 11, TYPE_DUST, 0.28, 0.7);
-  // Molecular gas: huge soft billboards tracing the arms.
-  place(gas, 0.001, 22, 48, Math.random() < 0.5 ? 9 : 10, TYPE_GAS, 0.22, 0.6);
+  // Molecular gas: soft billboards tracing the arms — kept out of the
+  // bright core, where additive overlap would blow out the image.
+  place(gas, 0.001, 12, 26, -2, TYPE_GAS, 0.22, 0.6, radius * 0.22);
 
   // Spherical bulge, dispersion-supported.
   const bulgeN = Math.floor(stars * 0.12);
@@ -138,7 +142,7 @@ const def = (key, label, init) => Scenarios.list.push({ key, label, init });
 def('galaxy', 'SPIRAL GALAXY', () => {
   Object.assign(P().cfg, { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 });
   makeGalaxy({ cx: 0, cy: 0, cz: 0, cvx: 0, cvy: 0, cvz: 0,
-    stars: 8000, dust: 17000, gas: 900, radius: 900, bhMass: 40000,
+    stars: 4600, dust: 9000, gas: 600, radius: 900, bhMass: 40000,
     tiltRad: 0.0, spinDir: 1 });
   return { camDist: 1500, lightPos: { x: 0, y: 0, z: 0 } };
 });
@@ -146,10 +150,10 @@ def('galaxy', 'SPIRAL GALAXY', () => {
 def('collision', 'GALAXY COLLISION', () => {
   Object.assign(P().cfg, { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 });
   makeGalaxy({ cx: -750, cy: -80, cz: -260, cvx: 2.4, cvy: 0.2, cvz: 0.9,
-    stars: 4500, dust: 9000, gas: 500, radius: 600, bhMass: 26000,
+    stars: 2800, dust: 5600, gas: 380, radius: 600, bhMass: 26000,
     tiltRad: 0.15, azimuthRad: 0.4, spinDir: 1 });
   makeGalaxy({ cx: 750, cy: 80, cz: 260, cvx: -2.4, cvy: -0.2, cvz: -0.9,
-    stars: 4500, dust: 9000, gas: 500, radius: 600, bhMass: 26000,
+    stars: 2800, dust: 5600, gas: 380, radius: 600, bhMass: 26000,
     tiltRad: 0.65, azimuthRad: 2.1, spinDir: -1 });
   return { camDist: 2300, lightPos: { x: 0, y: 0, z: 0 } };
 });
@@ -158,7 +162,8 @@ def('solar', 'SOLAR SYSTEM', () => {
   Object.assign(P().cfg, { dt: 0.05, substeps: 3, softening: 1.5, captureRadius: 4, myrPerT: 0.002 });
   const bodies = B();
   const SUN = 50000;
-  bodies.add(0, 0, 0, 0, 0, 0, SUN, 15, 7, TYPE_PLANET, 'Sol');
+  // The sun glows (star sprite); planets are lit spheres.
+  bodies.add(0, 0, 0, 0, 0, 0, SUN, 11, 7, TYPE_STAR, 'Sol');
 
   // [name, a, mass, radVis, colorIdx, inclination°]
   const planets = [
@@ -241,7 +246,7 @@ def('nebula', 'STELLAR NURSERY', () => {
       x: R * Math.sin(ph) * Math.cos(th),
       y: R * Math.cos(ph) * 0.55,
       z: R * Math.sin(ph) * Math.sin(th),
-      s: rand(60, 150),
+      s: rand(100, 220),
       m: rand(2200, 5200),
     });
   }
@@ -263,15 +268,15 @@ def('nebula', 'STELLAR NURSERY', () => {
   // The cloud: gas billboards + fine dust falling slowly toward the cores.
   const sample = () => {
     const c = cores[(Math.random() * CLUMPS) | 0];
-    return [c.x + gauss() * c.s * 2.2, c.y + gauss() * c.s * 1.4, c.z + gauss() * c.s * 2.2];
+    return [c.x + gauss() * c.s * 2.6, c.y + gauss() * c.s * 1.6, c.z + gauss() * c.s * 2.6];
   };
-  for (let i = 0; i < 2400; i++) {
+  for (let i = 0; i < 1100; i++) {
     const [x, y, z] = sample();
     const d = Math.hypot(x, y, z) + 1;
     const v = Math.sqrt(totalM / Math.max(d, 200)) * 0.25;
     bodies.add(x, y, z,
       -x / d * v + gauss() * 0.4, -y / d * v + gauss() * 0.4, -z / d * v + gauss() * 0.4,
-      0.001, rand(18, 55), Math.random() < 0.55 ? 9 : 10, TYPE_GAS, null);
+      0.001, rand(10, 26), Math.random() < 0.55 ? 9 : 10, TYPE_GAS, null);
   }
   for (let i = 0; i < 9000; i++) {
     const [x, y, z] = sample();
@@ -305,7 +310,7 @@ def('cluster', 'GLOBULAR CLUSTER', () => {
     }
   };
   put(N, starM, 0.7, 1.9, TYPE_STAR);
-  put(7000, 0.001, 0.3, 0.7, TYPE_DUST);
+  put(6000, 0.001, 0.3, 0.7, TYPE_DUST);
   return { camDist: 1100, lightPos: { x: 0, y: 0, z: 0 } };
 });
 
@@ -324,8 +329,8 @@ def('bigbang', 'BIG BANG', () => {
         mass, rand(radLo, radHi), colorFn(), type, null);
     }
   };
-  put(9000, 2.2, 0.6, 1.6, TYPE_STAR, starColor);
-  put(15000, 0.001, 0.3, 0.7, TYPE_DUST, () => 11);
+  put(6500, 2.2, 0.6, 1.6, TYPE_STAR, starColor);
+  put(11000, 0.001, 0.3, 0.7, TYPE_DUST, () => 11);
   put(700, 0.001, 14, 30, TYPE_GAS, () => (Math.random() < 0.5 ? 9 : 10));
   return { camDist: 900, lightPos: { x: 0, y: 0, z: 0 } };
 });
@@ -335,10 +340,10 @@ def('binary', 'BINARY BLACK HOLES', () => {
   const m = 22000, d = 560;
   const v = Math.sqrt(1.6 * m / (2 * d));   // each side carries its disk (1.6m total)
   makeGalaxy({ cx: -d / 2, cy: 0, cz: 0, cvx: 0, cvy: v * 0.25, cvz: v,
-    stars: 3500, dust: 7000, gas: 350, radius: 240, bhMass: m,
+    stars: 2600, dust: 5200, gas: 300, radius: 240, bhMass: m,
     tiltRad: 0.44, azimuthRad: 0.0, spinDir: 1 });
   makeGalaxy({ cx: d / 2, cy: 0, cz: 0, cvx: 0, cvy: -v * 0.25, cvz: -v,
-    stars: 3500, dust: 7000, gas: 350, radius: 240, bhMass: m,
+    stars: 2600, dust: 5200, gas: 300, radius: 240, bhMass: m,
     tiltRad: -0.70, azimuthRad: 1.2, spinDir: -1 });
   return { camDist: 1500, lightPos: { x: 0, y: 0, z: 0 } };
 });

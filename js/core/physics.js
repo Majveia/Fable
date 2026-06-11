@@ -13,8 +13,8 @@
       dt: 0.25,
       substeps: 1,
       softening: 4,
-      theta2: 0.81,        // Barnes-Hut theta^2, adapted at runtime
-      theta2Base: 0.81,
+      theta2: 1.21,        // Barnes-Hut theta^2 (theta=1.1), adapted at runtime
+      theta2Base: 1.21,
       captureRadius: 6,    // black holes swallow bodies inside this
       massiveMin: 0.01,    // below this mass a body is a tracer
       timeScale: 1,
@@ -45,12 +45,25 @@
       const n = B.n;
       const { px, py, pz, vx, vy, vz, mass } = B;
 
+      // Tracers exert no force, so they tolerate a cheaper kick schedule:
+      // each tracer is kicked every other step with a doubled dt —
+      // identical trajectory to first order, half the traversal cost.
+      // (Their drift still advances every step below.)
+      const parity = (this._step = ((this._step | 0) + 1) & 1);
+      const dt2 = dt * 2;
+
       for (let i = 0; i < n; i++) {
-        const th = mass[i] >= massiveMin ? thetaMassive : thetaTracer;
-        tree.accel(px[i], py[i], pz[i], th, soft2, out);
-        vx[i] += out.x * dt;
-        vy[i] += out.y * dt;
-        vz[i] += out.z * dt;
+        let kdt = dt;
+        if (mass[i] < massiveMin) {
+          if ((i & 1) === parity) continue;
+          kdt = dt2;
+          tree.accel(px[i], py[i], pz[i], thetaTracer, soft2, out);
+        } else {
+          tree.accel(px[i], py[i], pz[i], thetaMassive, soft2, out);
+        }
+        vx[i] += out.x * kdt;
+        vy[i] += out.y * kdt;
+        vz[i] += out.z * kdt;
       }
 
       // Interactive gravity well: pulls like a heavy invisible mass.
