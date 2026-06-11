@@ -29,6 +29,8 @@
   const SPARE = 64;
   const MAX_TRAV = 8192;
   const MAX_BH = 16;
+  const MAX_HALO = 64;
+  const TRACER_POOL = 8192;   // recycled slots for supernova remnant shells
   const PULL_SOFT2 = 400;
 
   const VS = `#version 300 es
@@ -52,6 +54,9 @@
   uniform vec4 u_pull;                  // xyz + mass (0 = off)
   uniform int u_nbh;
   uniform vec4 u_bh[${MAX_BH}];         // xyz + capture radius
+  uniform int u_nhalo;
+  uniform vec4 u_haloA[${MAX_HALO}];    // xyz + v0^2
+  uniform vec4 u_haloB[${MAX_HALO}];    // rc^2, rMax^2, -, -
   layout(location = 0) out vec4 oPos;
   layout(location = 1) out vec4 oVel;
 
@@ -62,8 +67,11 @@
     vec4 pm = texelFetch(u_pos, tc(id), 0);
     vec4 vt = texelFetch(u_vel, tc(id), 0);
     if (id >= u_count || pm.w < 0.0) { oPos = pm; oVel = vt; return; }
-    vec3 p = pm.xyz;
+    // Drift-kick-drift leapfrog (2nd-order symplectic). The tree was
+    // built from start-of-step readback positions; the half-drift
+    // offset is below the opening-angle error.
     vec3 v = vt.xyz;
+    vec3 p = pm.xyz + v * (u_dt * 0.5);
     float theta2 = id < u_massiveCount ? u_thetaM : u_thetaT;
     vec3 a = vec3(0.0);
 
@@ -86,6 +94,15 @@
       }
     }
 
+    for (int h = 0; h < ${MAX_HALO}; h++) {
+      if (h >= u_nhalo) break;
+      vec3 d = u_haloA[h].xyz - p;
+      float r2 = dot(d, d);
+      float f = u_haloA[h].w / (r2 + u_haloB[h].x);
+      if (r2 > u_haloB[h].y) f *= u_haloB[h].y / r2;
+      a += d * f;
+    }
+
     if (u_pull.w > 0.0) {
       vec3 d = u_pull.xyz - p;
       float d2 = dot(d, d) + ${PULL_SOFT2}.0;
@@ -93,7 +110,7 @@
     }
 
     v += a * u_dt;
-    p += v * u_dt;
+    p += v * (u_dt * 0.5);
 
     float alive = pm.w;
     if (id >= u_massiveCount) {
@@ -118,6 +135,10 @@
   let massiveSlots = 0;     // live massive region incl. spares
   let deadMassive = 0;
   const bhUniform = new Float32Array(MAX_BH * 4);
+  const haloA = new Float32Array(MAX_HALO * 4);
+  const haloB = new Float32Array(MAX_HALO * 4);
+  let poolStart = 0, poolNext = 0, poolUsed = 0;  // remnant-shell tracer pool
+  let pboPos = null, pboVel = null, fence = null;  // async readback (1-frame latency)
 
   function makeTex(w, h) {
     const t = gl.createTexture();
@@ -175,7 +196,7 @@
         }
         for (const u of ['u_pos', 'u_vel', 'u_tree', 'u_count', 'u_massiveCount',
                          'u_dt', 'u_soft2', 'u_thetaM', 'u_thetaT', 'u_pull',
-                         'u_nbh', 'u_bh']) {
+                         'u_nbh', 'u_bh', 'u_nhalo', 'u_haloA', 'u_haloB']) {
           uni[u] = gl.getUniformLocation(prog, u);
         }
         vao = gl.createVertexArray();
@@ -212,8 +233,13 @@
       }
       const M = massiveIdx.length;
       massiveSlots = M + SPARE;
-      const total = Math.min(massiveSlots + tracerIdx.length, this._maxBodies);
+      const nTracers = Math.min(tracerIdx.length,
+                                this._maxBodies - massiveSlots - TRACER_POOL);
+      const total = massiveSlots + nTracers + TRACER_POOL;
       deadMassive = 0;
+      poolStart = massiveSlots + nTracers;
+      poolNext = poolStart;
+      poolUsed = 0;
 
       const pos = uploadBuf;
       const vel = new Float32Array(total * 4);
@@ -235,11 +261,12 @@
       };
       for (const t of tmp) put(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], true);
       for (let s = 0; s < SPARE; s++) put(0, 0, 0, 0, 0, 0, 0, 0, 0, 255, false);
-      for (const i of tracerIdx) {
-        if (slot >= total) break;
+      for (let k = 0; k < nTracers; k++) {
+        const i = tracerIdx[k];
         put(B.px[i], B.py[i], B.pz[i], B.vx[i], B.vy[i], B.vz[i],
             B.mass[i], B.rad[i], B.colorIdx[i], B.type[i], true);
       }
+      for (let k = 0; k < TRACER_POOL; k++) put(0, 0, 0, 0, 0, 0, 0, 4, 9, 4, false);
 
       // Rewrite Bodies as the slot-frozen massive mirror.
       for (let s2 = 0; s2 < massiveSlots; s2++) {
@@ -270,6 +297,15 @@
       this.attribsVersion++;
       readPosBuf = new Float32Array(Math.ceil(massiveSlots / TEXW) * TEXW * 4);
       readVelBuf = new Float32Array(readPosBuf.length);
+      if (fence) { gl.deleteSync(fence); fence = null; }
+      for (const old of [pboPos, pboVel]) if (old) gl.deleteBuffer(old);
+      pboPos = gl.createBuffer();
+      pboVel = gl.createBuffer();
+      for (const b of [pboPos, pboVel]) {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, b);
+        gl.bufferData(gl.PIXEL_PACK_BUFFER, readPosBuf.byteLength, gl.STREAM_READ);
+      }
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       return { count: total, massiveCount: massiveSlots };
     },
 
@@ -284,18 +320,26 @@
       if (c.paused || c.timeScale <= 0 || this.count === 0) return;
       const B = globalThis.Bodies;
 
-      // ---- 1. read back massive region (sync; small: <= ~40 rows)
+      // ---- 1. consume the async readback started last frame (fenced
+      // PBOs, one frame of latency; the mirror just stays one frame
+      // stale when the GPU hasn't signaled yet).
       const mRows = Math.ceil(massiveSlots / TEXW);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, readFBO);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texPos[front], 0);
-      gl.readPixels(0, 0, TEXW, mRows, gl.RGBA, gl.FLOAT, readPosBuf);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texVel[front], 0);
-      gl.readPixels(0, 0, TEXW, mRows, gl.RGBA, gl.FLOAT, readVelBuf);
-      for (let i = 0; i < massiveSlots; i++) {
-        if (B.type[i] === 255 || B.mass[i] <= 0) continue;
-        const o = i * 4;
-        B.px[i] = readPosBuf[o]; B.py[i] = readPosBuf[o + 1]; B.pz[i] = readPosBuf[o + 2];
-        B.vx[i] = readVelBuf[o]; B.vy[i] = readVelBuf[o + 1]; B.vz[i] = readVelBuf[o + 2];
+      if (fence) {
+        const st = gl.clientWaitSync(fence, 0, 0);
+        if (st === gl.ALREADY_SIGNALED || st === gl.CONDITION_SATISFIED) {
+          gl.deleteSync(fence); fence = null;
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pboPos);
+          gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, readPosBuf);
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pboVel);
+          gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, readVelBuf);
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+          for (let i = 0; i < massiveSlots; i++) {
+            if (B.type[i] === 255 || B.mass[i] <= 0) continue;
+            const o = i * 4;
+            B.px[i] = readPosBuf[o]; B.py[i] = readPosBuf[o + 1]; B.pz[i] = readPosBuf[o + 2];
+            B.vx[i] = readVelBuf[o]; B.vy[i] = readVelBuf[o + 1]; B.vz[i] = readVelBuf[o + 2];
+          }
+        }
       }
 
       // ---- 2. massive-vs-massive capture on the mirror
@@ -358,6 +402,18 @@
       gl.uniform4f(uni.u_pull, p ? p.x : 0, p ? p.y : 0, p ? p.z : 0, p ? p.mass : 0);
       gl.uniform1i(uni.u_nbh, nbh);
       gl.uniform4fv(uni.u_bh, bhUniform);
+      const DM = globalThis.DarkMatter;
+      const halos = DM && DM.on ? DM.list : [];
+      const nh = Math.min(halos.length, MAX_HALO);
+      if (globalThis.updateHaloCenters && nh) globalThis.updateHaloCenters(B, halos);
+      for (let h = 0; h < nh; h++) {
+        haloA[h * 4] = halos[h].x; haloA[h * 4 + 1] = halos[h].y;
+        haloA[h * 4 + 2] = halos[h].z; haloA[h * 4 + 3] = halos[h].v02;
+        haloB[h * 4] = halos[h].rc2; haloB[h * 4 + 1] = halos[h].rMax2;
+      }
+      gl.uniform1i(uni.u_nhalo, nh);
+      gl.uniform4fv(uni.u_haloA, haloA);
+      gl.uniform4fv(uni.u_haloB, haloB);
 
       for (let s = 0; s < c.substeps; s++) {
         const back = 1 - front;
@@ -379,9 +435,46 @@
         c.t += dt;
       }
       gl.bindVertexArray(null);
+
+      // ---- 6. start the next async readback of the fresh positions
+      if (!fence) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, readFBO);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texPos[front], 0);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pboPos);
+        gl.readPixels(0, 0, TEXW, mRows, gl.RGBA, gl.FLOAT, 0);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texVel[front], 0);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pboVel);
+        gl.readPixels(0, 0, TEXW, mRows, gl.RGBA, gl.FLOAT, 0);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      }
+
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.activeTexture(gl.TEXTURE0);
       this.posTex = texPos[front];
+    },
+
+    /* Supernova remnant shell: spawn `count` gas tracers expanding
+       radially from (x,y,z), recycling the oldest pool slots. */
+    addBurst(x, y, z, vx, vy, vz, count) {
+      if (!gl || TRACER_POOL === 0) return;
+      const sa = this.staticAttribs;
+      for (let k = 0; k < count; k++) {
+        const slot = poolNext;
+        poolNext = poolStart + ((poolNext - poolStart + 1) % TRACER_POOL);
+        if (poolUsed < TRACER_POOL) poolUsed++;
+        const ct = 2 * Math.random() - 1, st = Math.sqrt(1 - ct * ct);
+        const ph = 2 * Math.PI * Math.random();
+        const dx = st * Math.cos(ph), dy = ct, dz = st * Math.sin(ph);
+        const sp = 2.5 + Math.random() * 3.5;
+        const r0 = 1 + Math.random() * 5;
+        this._writeTexel(texPos[front], slot, x + dx * r0, y + dy * r0, z + dz * r0, 0.0001);
+        this._writeTexel(texVel[front], slot, vx + dx * sp, vy + dy * sp, vz + dz * sp, 4);
+        sa[slot * 3] = 2.5 + Math.random() * 4.5;
+        sa[slot * 3 + 1] = Math.random() < 0.5 ? 9 : 10;
+        sa[slot * 3 + 2] = 4;
+      }
+      this.attribsVersion++;
     },
 
     addMassive(x, y, z, vx, vy, vz, m, rad, col, type) {
@@ -411,7 +504,7 @@
       else if (fps > 55) c.theta2 = Math.max(c.theta2 * 0.99, c.theta2Base);
     },
 
-    bodyCount() { return this.count - SPARE - deadMassive; },
+    bodyCount() { return this.count - SPARE - deadMassive - (TRACER_POOL - poolUsed); },
     simTimeMyr() { return this.cfg.t * this.cfg.myrPerT; },
 
     evolutionView() {

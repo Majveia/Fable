@@ -36,6 +36,11 @@
     font-size: 10px; letter-spacing: 1px; color: rgba(184,194,224,0.5);
   }
 
+  #focus {
+    position: fixed; bottom: 20px; left: 26px; user-select: none;
+    font-size: 10px; letter-spacing: 1px; color: rgba(184,194,224,0.75);
+  }
+
   #hintkey {
     position: fixed; top: 24px; right: 26px; user-select: none;
     font-size: 10px; letter-spacing: 1px; color: rgba(184,194,224,0.4);
@@ -90,6 +95,7 @@
 <div id="hintkey" class="ui">h — help</div>
 <div id="dots" class="ui"></div>
 <div id="stat" class="ui"></div>
+<div id="focus" class="ui"></div>
 <div id="toast"></div>
 
 <div id="help">
@@ -103,8 +109,11 @@
       <tr><td>space</td><td>pause</td></tr>
       <tr><td>[ &nbsp;]</td><td>time speed</td></tr>
       <tr><td>t</td><td>trails</td></tr>
+      <tr><td>click</td><td>track a body &nbsp;·&nbsp; esc releases</td></tr>
       <tr><td>b</td><td>drop a black hole at the cursor</td></tr>
       <tr><td>g (hold)</td><td>gravity well at the cursor</td></tr>
+      <tr><td>d</td><td>dark matter on/off</td></tr>
+      <tr><td>m</td><td>sound on/off</td></tr>
       <tr><td>r</td><td>reset scenario</td></tr>
       <tr><td>f</td><td>fullscreen</td></tr>
       <tr><td>h</td><td>close this</td></tr>
@@ -123,6 +132,7 @@
 <script src="js/render/camera.js"></script>
 <script src="js/render/renderer.js"></script>
 <script src="js/render/postfx.js"></script>
+<script src="js/sound.js"></script>
 <script src="js/scenarios.js"></script>
 <script src="js/main.js"></script>
 </body>

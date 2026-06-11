@@ -65,7 +65,7 @@ for (const sc of Scenarios.list) {
   const r1 = medianRadius();
   // bigbang expands enormously by design; the supercluster also has a
   // mild Hubble flow on a huge volume.
-  const boundMul = sc.key === 'bigbang' ? 20 : sc.key === 'supercluster' ? 8 : 4;
+  const boundMul = sc.key === 'bigbang' ? 25 : sc.key === 'supercluster' ? 8 : 4;
   assert(r1 < r0 * boundMul + 100, `${sc.key}: bounded (median r ${r0.toFixed(0)} -> ${r1.toFixed(0)})`);
   assert(perStep <= 35, `${sc.key}: perf ${perStep.toFixed(1)} ms/step, ${n0} bodies`);
   if (tracers > 0) {

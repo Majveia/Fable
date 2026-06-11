@@ -12,12 +12,23 @@ const P = () => globalThis.Physics;
 
 const TYPE_STAR = 0, TYPE_BH = 1, TYPE_PLANET = 2, TYPE_DUST = 3, TYPE_GAS = 4;
 
-const rand = (a, b) => a + Math.random() * (b - a);
-const gauss = () => (Math.random() + Math.random() + Math.random() + Math.random() - 2) / 2;
+// Seedable RNG so a shared URL reproduces the exact same universe.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+let _rng = Math.random;
+const rand = (a, b) => a + _rng() * (b - a);
+const gauss = () => (_rng() + _rng() + _rng() + _rng() - 2) / 2;
 
 // Cool dwarfs dominate real stellar populations.
 function starColor() {
-  const u = Math.random();
+  const u = _rng();
   if (u < 0.45) return 6;
   if (u < 0.70) return 5;
   if (u < 0.85) return 4;
@@ -67,6 +78,19 @@ function makeGalaxy(opts) {
   const zScale = radius / 28;            // thin-disk thickness
   const innerR = Math.max(radius * 0.06, 40);
 
+  // Dark-matter halo: cored isothermal sphere giving the flat outer
+  // rotation curve real galaxies have. Registered for the engines and
+  // folded into the circular velocities below.
+  const v02 = 3 * bhMass / radius;
+  const rc = radius * 0.2;
+  if (globalThis.DarkMatter) {
+    globalThis.DarkMatter.list.push({
+      x: cx, y: cy, z: cz, v02, rc2: rc * rc, rMax2: (radius * 2) ** 2,
+    });
+  }
+  const haloV2 = (r) => (globalThis.DarkMatter && globalThis.DarkMatter.on)
+    ? v02 * r * r / (r * r + rc * rc) : 0;
+
   const enclosed = (r) => {
     const t = r / scale;
     return bhMass + diskMass * (1 - Math.exp(-t) * (1 + t));
@@ -76,21 +100,21 @@ function makeGalaxy(opts) {
   const place = (count, mass, radLo, radHi, color, type, armTight, zMul, rMin) => {
     const lo = Math.max(innerR, rMin || 0);
     for (let i = 0; i < count; i++) {
-      let r = -Math.log(1 - Math.random()) * scale;
+      let r = -Math.log(1 - _rng()) * scale;
       r = Math.max(lo, Math.min(r, radius));
       const arm = (i % arms) * (2 * Math.PI / arms);
-      const theta = arm + (r / radius) * 3.2 * spinDir + gauss() * armTight + Math.random() * 0.25;
+      const theta = arm + (r / radius) * 3.2 * spinDir + gauss() * armTight + _rng() * 0.25;
       const z = gauss() * zScale * zMul;
       const ct = Math.cos(theta), st = Math.sin(theta);
       const x = cx + (ux * ct + vx_ * st) * r + nx * z;
       const y = cy + (uy * ct + vy_ * st) * r + ny * z;
       const zz = cz + (uz * ct + vz_ * st) * r + nz * z;
-      const v = Math.sqrt(enclosed(r) / r);
+      const v = Math.sqrt(enclosed(r) / r + haloV2(r));
       const tvx = (-ux * st + vx_ * ct) * spinDir * v;
       const tvy = (-uy * st + vy_ * ct) * spinDir * v;
       const tvz = (-uz * st + vz_ * ct) * spinDir * v;
       const c = color === -1 ? starColor()
-              : color === -2 ? (Math.random() < 0.5 ? 9 : 10)
+              : color === -2 ? (_rng() < 0.5 ? 9 : 10)
               : color;
       bodies.add(x, y, zz, cvx + tvx, cvy + tvy, cvz + tvz,
                  mass, rand(radLo, radHi), c, type, null);
@@ -108,10 +132,10 @@ function makeGalaxy(opts) {
   const bulgeN = Math.floor(stars * 0.12);
   for (let i = 0; i < bulgeN; i++) {
     const r = innerR + Math.abs(gauss()) * radius * 0.08;
-    const th = Math.random() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
+    const th = _rng() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
     const sx = r * Math.sin(ph) * Math.cos(th), sy = r * Math.cos(ph), sz = r * Math.sin(ph) * Math.sin(th);
-    const v = Math.sqrt(enclosed(r) / r) * rand(0.5, 0.9);
-    const dth = Math.random() * 2 * Math.PI, dph = Math.acos(rand(-1, 1));
+    const v = Math.sqrt(enclosed(r) / r + haloV2(r)) * rand(0.5, 0.9);
+    const dth = _rng() * 2 * Math.PI, dph = Math.acos(rand(-1, 1));
     bodies.add(cx + sx, cy + sy, cz + sz,
       cvx + v * Math.sin(dph) * Math.cos(dth),
       cvy + v * Math.cos(dph),
@@ -123,11 +147,11 @@ function makeGalaxy(opts) {
   const haloN = Math.floor(stars * 0.06);
   for (let i = 0; i < haloN; i++) {
     const r = rand(radius * 0.4, radius * 1.5);
-    const th = Math.random() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
+    const th = _rng() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
     const sx = r * Math.sin(ph) * Math.cos(th), sy = r * Math.cos(ph), sz = r * Math.sin(ph) * Math.sin(th);
     // Tangential direction perpendicular to the radial vector.
     const [tx1, ty1, tz1] = basisFor(sx / r, sy / r, sz / r);
-    const v = Math.sqrt(enclosed(r) / r) * rand(0.7, 1.0);
+    const v = Math.sqrt(enclosed(r) / r + haloV2(r)) * rand(0.7, 1.0);
     bodies.add(cx + sx, cy + sy, cz + sz,
       cvx + tx1 * v, cvy + ty1 * v, cvz + tz1 * v,
       0.001, rand(0.4, 1.0), 6, TYPE_DUST, null);
@@ -138,7 +162,15 @@ function makeGalaxy(opts) {
 
 const Scenarios = { list: [] };
 const DEF_BUDGET = { gpu: false, maxBodies: 1 << 17 };
-const def = (key, label, init) => Scenarios.list.push({ key, label, init });
+const def = (key, label, fn) => Scenarios.list.push({
+  key, label,
+  init(budget = DEF_BUDGET, seed) {
+    Scenarios.lastSeed = (seed === undefined ? (Math.random() * 2 ** 31) | 0 : seed) >>> 0;
+    _rng = mulberry32(Scenarios.lastSeed);
+    if (globalThis.DarkMatter) globalThis.DarkMatter.list.length = 0;
+    return fn(budget);
+  },
+});
 
 def('galaxy', 'SPIRAL GALAXY', (budget = DEF_BUDGET) => {
   Object.assign(P().cfg, { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 });
@@ -264,7 +296,7 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
   const CLUMPS = 7;
   const cores = [];
   for (let k = 0; k < CLUMPS; k++) {
-    const th = Math.random() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
+    const th = _rng() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
     const R = rand(60, 420);
     cores.push({
       x: R * Math.sin(ph) * Math.cos(th),
@@ -280,18 +312,18 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
     const nStars = Math.round((60 + c.m / 40) * (g ? 4 : 1));
     for (let i = 0; i < nStars; i++) {
       const r = Math.abs(gauss()) * c.s * 0.25 + 2;
-      const th = Math.random() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
+      const th = _rng() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
       const v = Math.sqrt(c.m / Math.max(r, 8)) * rand(0.3, 0.7);
-      const dth = Math.random() * 2 * Math.PI, dph = Math.acos(rand(-1, 1));
+      const dth = _rng() * 2 * Math.PI, dph = Math.acos(rand(-1, 1));
       bodies.add(
         c.x + r * Math.sin(ph) * Math.cos(th), c.y + r * Math.cos(ph), c.z + r * Math.sin(ph) * Math.sin(th),
         v * Math.sin(dph) * Math.cos(dth), v * Math.cos(dph), v * Math.sin(dph) * Math.sin(dth),
-        c.m / nStars, rand(0.9, 2.2), Math.random() < 0.6 ? 0 : 1, TYPE_STAR, null);
+        c.m / nStars, rand(0.9, 2.2), _rng() < 0.6 ? 0 : 1, TYPE_STAR, null);
     }
   }
   // The cloud: gas billboards + fine dust falling slowly toward the cores.
   const sample = () => {
-    const c = cores[(Math.random() * CLUMPS) | 0];
+    const c = cores[(_rng() * CLUMPS) | 0];
     return [c.x + gauss() * c.s * 2.6, c.y + gauss() * c.s * 1.6, c.z + gauss() * c.s * 2.6];
   };
   for (let i = 0; i < (g ? 9000 : 1100); i++) {
@@ -300,7 +332,7 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
     const v = Math.sqrt(totalM / Math.max(d, 200)) * 0.25;
     bodies.add(x, y, z,
       -x / d * v + gauss() * 0.4, -y / d * v + gauss() * 0.4, -z / d * v + gauss() * 0.4,
-      0.001, rand(10, 26), Math.random() < 0.55 ? 9 : 10, TYPE_GAS, null);
+      0.001, rand(10, 26), _rng() < 0.55 ? 9 : 10, TYPE_GAS, null);
   }
   for (let i = 0; i < (g ? 60000 : 9000); i++) {
     const [x, y, z] = sample();
@@ -320,15 +352,15 @@ def('cluster', 'GLOBULAR CLUSTER', (budget = DEF_BUDGET) => {
   const N = g ? 14000 : 6000, a = 220, starM = 1.5, M = N * starM;
   const put = (count, mass, radLo, radHi, type) => {
     for (let i = 0; i < count; i++) {
-      const u = Math.random();
+      const u = _rng();
       let r = a / Math.sqrt(Math.pow(u, -2 / 3) - 1);
       r = Math.min(r, a * 8);
-      const th = Math.random() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
+      const th = _rng() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
       const x = r * Math.sin(ph) * Math.cos(th), y = r * Math.cos(ph), z = r * Math.sin(ph) * Math.sin(th);
       const enc = M * Math.pow(r, 3) / Math.pow(r * r + a * a, 1.5);
       const v = Math.sqrt(Math.max(enc, 0.01) / Math.max(r, 1)) * rand(0.6, 1.05);
       const [tx, ty, tz] = basisFor(x / r, y / r, z / r);
-      const sgn = Math.random() < 0.5 ? 1 : -1;
+      const sgn = _rng() < 0.5 ? 1 : -1;
       bodies.add(x, y, z,
         tx * v * sgn + gauss() * v * 0.3, ty * v * sgn + gauss() * v * 0.3, tz * v * sgn + gauss() * v * 0.3,
         mass, rand(radLo, radHi), type === TYPE_STAR ? starColor() : 6, type, null);
@@ -347,8 +379,8 @@ def('bigbang', 'BIG BANG', (budget = DEF_BUDGET) => {
   const H0 = 0.42, R = 60;
   const put = (count, mass, radLo, radHi, type, colorFn) => {
     for (let i = 0; i < count; i++) {
-      const r = Math.cbrt(Math.random()) * R;
-      const th = Math.random() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
+      const r = Math.cbrt(_rng()) * R;
+      const th = _rng() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
       const x = r * Math.sin(ph) * Math.cos(th), y = r * Math.cos(ph), z = r * Math.sin(ph) * Math.sin(th);
       bodies.add(x, y, z,
         x * H0 + gauss() * 1.3, y * H0 + gauss() * 1.3, z * H0 + gauss() * 1.3,
@@ -357,7 +389,7 @@ def('bigbang', 'BIG BANG', (budget = DEF_BUDGET) => {
   };
   put(g ? 12000 : 6500, 2.2, 0.6, 1.6, TYPE_STAR, starColor);
   put(g ? 128000 : 11000, 0.001, 0.3, 0.7, TYPE_DUST, () => 11);
-  put(g ? 5000 : 700, 0.001, 14, 30, TYPE_GAS, () => (Math.random() < 0.5 ? 9 : 10));
+  put(g ? 5000 : 700, 0.001, 14, 30, TYPE_GAS, () => (_rng() < 0.5 ? 9 : 10));
   return { camDist: 900, lightPos: { x: 0, y: 0, z: 0 } };
 });
 
@@ -367,7 +399,7 @@ def('supercluster', 'SUPERCLUSTER', (budget = DEF_BUDGET) => {
   const R = 4500, H = 0.02;
   // Cosmic web: dwarf galaxies strung along a few filaments, expanding
   // with a mild Hubble flow while gravity pulls neighbors into mergers.
-  const FIL = 3 + (Math.random() < 0.5 ? 1 : 0);
+  const FIL = 3 + (_rng() < 0.5 ? 1 : 0);
   const NGAL = g ? 52 : 45;
   // Per-galaxy populations sized to the mode's body budget (makeGalaxy
   // adds ~1.18x stars as massive plus the dust/gas/halo tracers).
@@ -379,7 +411,7 @@ def('supercluster', 'SUPERCLUSTER', (budget = DEF_BUDGET) => {
 
   const fils = [];
   for (let f = 0; f < FIL; f++) {
-    const th = Math.random() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
+    const th = _rng() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
     const dir = [Math.sin(ph) * Math.cos(th), Math.cos(ph), Math.sin(ph) * Math.sin(th)];
     const off = [gauss() * R * 0.25, gauss() * R * 0.25, gauss() * R * 0.25];
     fils.push({ dir, off });
@@ -387,7 +419,7 @@ def('supercluster', 'SUPERCLUSTER', (budget = DEF_BUDGET) => {
   for (let k = 0; k < NGAL; k++) {
     if (B().n + Math.floor(stars * 1.18) + dust + gas + 1 > budget.maxBodies) break;
     const f = fils[k % FIL];
-    const t = (Math.random() * 2 - 1) * R;
+    const t = (_rng() * 2 - 1) * R;
     const cx = f.off[0] + f.dir[0] * t + gauss() * 380;
     const cy = f.off[1] + f.dir[1] * t + gauss() * 380;
     const cz = f.off[2] + f.dir[2] * t + gauss() * 380;
@@ -397,7 +429,7 @@ def('supercluster', 'SUPERCLUSTER', (budget = DEF_BUDGET) => {
       stars, dust, gas,
       radius: rand(120, 260), bhMass: rand(3000, 9000),
       tiltRad: rand(0, Math.PI), azimuthRad: rand(0, 2 * Math.PI),
-      spinDir: Math.random() < 0.5 ? 1 : -1,
+      spinDir: _rng() < 0.5 ? 1 : -1,
     });
   }
   return { camDist: 9000, lightPos: { x: 0, y: 0, z: 0 } };

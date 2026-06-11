@@ -151,6 +151,9 @@
     //   decreases monotonically across supernovae.
     // Only TYPE_STAR evolves. Returns the number of supernovae fired
     // this call; calls view.setDirty() if any visual/mass/type changed.
+    // Slot indices of this call's supernovae land in lastEvents so the
+    // caller can spawn remnant shells at those bodies' positions.
+    lastEvents: [],
     step(view, dtMyr) {
       const n = view.n | 0;
       this._ensure(view, n);
@@ -158,6 +161,7 @@
       const age = this._age, life = this._life, phase = this._phase;
       const baseRad = this._baseRad, baseColor = this._baseColor, roll = this._roll;
       let dirty = false, fired = 0;
+      this.lastEvents.length = 0;
 
       for (let i = 0; i < n; i++) {
         const ph = phase[i];
@@ -190,6 +194,7 @@
           colorIdx[i] = 3;
           mass[i] *= 0.2;                         // envelope ejected
           fired++;
+          this.lastEvents.push(i);
           dirty = true;
         } else if (a >= L * GIANT_AT) {           // red giant
           phase[i] = PH_GIANT;

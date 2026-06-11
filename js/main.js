@@ -37,6 +37,25 @@ let fpsSmooth = 60;
 let pulling = false;
 let lastSimT = 0;        // evolution clock, in sim-t units
 let frameNo = 0;
+let followSlot = -1;     // click-to-focus body slot, -1 = free camera
+
+// Shareable state: #s=<scenario>&seed=<n>&dm=<0|1>&ts=<speed>
+const boot = {};
+for (const kv of location.hash.replace(/^#/, '').split('&')) {
+  const [k, v] = kv.split('=');
+  if (k) boot[k] = decodeURIComponent(v || '');
+}
+let hashTimer = 0;
+function updateHash() {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    const sc = Scenarios.list[scenarioIdx];
+    const h = '#s=' + sc.key + '&seed=' + Scenarios.lastSeed +
+              '&dm=' + (DarkMatter.on ? 1 : 0) +
+              '&ts=' + engine.cfg.timeScale.toFixed(1);
+    history.replaceState(null, '', h);
+  }, 400);
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -48,15 +67,17 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove('show'), 1800);
 }
 
-function loadScenario(i) {
+function loadScenario(i, seed) {
   scenarioIdx = (i + Scenarios.list.length) % Scenarios.list.length;
   const sc = Scenarios.list[scenarioIdx];
+  followSlot = -1;
+  $('focus').textContent = '';
   Bodies.clear();
   Physics.cfg.t = 0;
   Physics.cfg.timeScale = engine.cfg.timeScale; // keep user's speed setting
   Physics.cfg.theta2 = Physics.cfg.theta2Base;
   engine.clearPull();
-  const ret = sc.init({ gpu: gpuOK, maxBodies: gpuOK ? MAX_GPU_BODIES - 128 : Bodies.CAP });
+  const ret = sc.init({ gpu: gpuOK, maxBodies: gpuOK ? MAX_GPU_BODIES - 128 : Bodies.CAP }, seed);
   if (gpuOK) {
     // Scenarios write Physics.cfg; mirror it into the GPU engine.
     Object.assign(PhysicsGPU.cfg, Physics.cfg);
@@ -77,6 +98,7 @@ function loadScenario(i) {
   Camera3D.setGoal({ targetX: 0, targetY: 0, targetZ: 0,
                      dist: ret.camDist, yaw: -0.7, pitch: 0.42 });
   toast(sc.label);
+  updateHash();
   document.querySelectorAll('#dots span').forEach((d, k) =>
     d.classList.toggle('on', k === scenarioIdx));
 }
@@ -118,8 +140,39 @@ function dropBlackHole(sx, sy) {
   toast('BLACK HOLE');
 }
 
+// ------------------------------------------------------------ click-to-focus
+// Pick the massive body nearest the click in screen space (the CPU
+// mirror always holds the massive set, in both engine modes).
+function pickBody(sx, sy) {
+  const vp = Camera3D.viewProj(W / H);
+  let best = -1, bestD = 28 * 28, bestW = Infinity;
+  for (let i = 0; i < Bodies.n; i++) {
+    if (Bodies.mass[i] <= 0 || Bodies.type[i] === 255) continue;
+    const x = Bodies.px[i], y = Bodies.py[i], z = Bodies.pz[i];
+    const cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+    if (cw < 0.1) continue;
+    const cx = (vp[0] * x + vp[4] * y + vp[8] * z + vp[12]) / cw;
+    const cy = (vp[1] * x + vp[5] * y + vp[9] * z + vp[13]) / cw;
+    const dx = (cx * 0.5 + 0.5) * W - sx;
+    const dy = (1 - (cy * 0.5 + 0.5)) * H - sy;
+    const d = dx * dx + dy * dy;
+    if (d < bestD || (d < bestD * 1.2 && cw < bestW)) {
+      if (d < bestD) { bestD = Math.max(d, 36); }
+      best = i; bestW = cw;
+    }
+  }
+  return best;
+}
+
+function focusLabel(i) {
+  if (i < 0) { $('focus').textContent = ''; return; }
+  const kind = ['star', 'black hole', 'planet', 'dust', 'gas'][Bodies.type[i]] || '';
+  const name = Bodies.names[i] || kind;
+  $('focus').textContent = '◉ ' + name + ' · m ' + Bodies.mass[i].toFixed(1);
+}
+
 // ------------------------------------------------------------ pointer input
-const ptr = { down: false, button: 0, x: 0, y: 0, shift: false };
+const ptr = { down: false, button: 0, x: 0, y: 0, shift: false, downX: 0, downY: 0 };
 const touches = new Map();
 let pinchDist = 0;
 
@@ -135,6 +188,8 @@ canvas.addEventListener('pointerdown', (e) => {
   }
   ptr.down = true; ptr.button = e.button; ptr.shift = e.shiftKey;
   ptr.x = e.clientX; ptr.y = e.clientY;
+  ptr.downX = e.clientX; ptr.downY = e.clientY;
+  if (globalThis.Sound) Sound.poke();
 });
 
 canvas.addEventListener('pointermove', (e) => {
@@ -165,6 +220,13 @@ canvas.addEventListener('pointermove', (e) => {
 const endPointer = (e) => {
   touches.delete(e.pointerId);
   if (touches.size < 2) pinchDist = 0;
+  // A click (not a drag) selects and tracks a body.
+  if (ptr.down && e.pointerType !== 'touch' && e.button === 0 &&
+      Math.hypot(e.clientX - ptr.downX, e.clientY - ptr.downY) < 6) {
+    followSlot = pickBody(e.clientX, e.clientY);
+    focusLabel(followSlot);
+    if (followSlot >= 0) toast('TRACKING');
+  }
   ptr.down = false;
 };
 canvas.addEventListener('pointerup', endPointer);
@@ -189,9 +251,23 @@ window.addEventListener('keydown', (e) => {
     case '[': engine.cfg.timeScale = Math.max(0, +(engine.cfg.timeScale - 0.1).toFixed(1));
       toast('TIME ' + engine.cfg.timeScale.toFixed(1) + 'x'); break;
     case ']': engine.cfg.timeScale = Math.min(3, +(engine.cfg.timeScale + 0.1).toFixed(1));
-      toast('TIME ' + engine.cfg.timeScale.toFixed(1) + 'x'); break;
-    case 'b': dropBlackHole(ptr.x || W / 2, ptr.y || H / 2); break;
+      toast('TIME ' + engine.cfg.timeScale.toFixed(1) + 'x'); updateHash(); break;
+    case 'b':
+      dropBlackHole(ptr.x || W / 2, ptr.y || H / 2);
+      if (globalThis.Sound) Sound.thud();
+      break;
     case 'g': pulling = true; break;
+    case 'd':
+      DarkMatter.on = !DarkMatter.on;
+      toast(DarkMatter.on ? 'DARK MATTER ON' : 'DARK MATTER OFF');
+      updateHash();
+      break;
+    case 'm':
+      if (globalThis.Sound) { Sound.poke(); toast(Sound.toggleMute() ? 'MUTED' : 'SOUND ON'); }
+      break;
+    case 'Escape':
+      followSlot = -1; focusLabel(-1);
+      break;
     case 'h': case '?': $('help').classList.toggle('show'); break;
     case 'f':
       if (document.fullscreenElement) document.exitFullscreen();
@@ -248,7 +324,31 @@ function frame(now) {
     const t = engine.cfg.t;
     const dtMyr = (t - lastSimT) * engine.cfg.myrPerT;
     lastSimT = t;
-    if (dtMyr > 0) Evolution.step(engine.evolutionView(), dtMyr);
+    if (dtMyr > 0) {
+      Evolution.step(engine.evolutionView(), dtMyr);
+      // Supernovae leave expanding remnant shells (and a chime).
+      const ev = Evolution.lastEvents;
+      for (let k = 0; k < Math.min(ev.length, 4); k++) {
+        const i = ev[k];
+        engine.addBurst(Bodies.px[i], Bodies.py[i], Bodies.pz[i],
+                        Bodies.vx[i], Bodies.vy[i], Bodies.vz[i], 90);
+        if (globalThis.Sound && k < 2) Sound.supernova();
+      }
+    }
+  }
+
+  // Click-to-focus: glue the camera target to the tracked body.
+  if (followSlot >= 0) {
+    if (followSlot < Bodies.n && Bodies.mass[followSlot] > 0 &&
+        Bodies.type[followSlot] !== 255) {
+      Camera3D.setGoal({
+        targetX: Bodies.px[followSlot],
+        targetY: Bodies.py[followSlot],
+        targetZ: Bodies.pz[followSlot],
+      });
+    } else {
+      followSlot = -1; focusLabel(-1);   // tracked body died
+    }
   }
 
   Camera3D.update(dtMs);
@@ -263,12 +363,17 @@ function frame(now) {
 }
 
 setInterval(() => {
+  if (globalThis.Sound) Sound.setScale(Camera3D.dist);
+  if (followSlot >= 0) focusLabel(followSlot);
   $('stat').textContent =
     engine.bodyCount().toLocaleString() + ' bodies · ' +
     engine.simTimeMyr().toFixed(1) + ' Myr · ' +
     Math.round(fpsSmooth) + ' fps · ' + (gpuOK ? 'gpu' : 'cpu');
 }, 400);
 
-loadScenario(0);
+if (boot.dm !== undefined) DarkMatter.on = boot.dm !== '0';
+if (boot.ts !== undefined) engine.cfg.timeScale = Math.max(0, Math.min(3, +boot.ts || 1));
+const bootIdx = Math.max(0, Scenarios.list.findIndex(sc => sc.key === boot.s));
+loadScenario(bootIdx, boot.seed !== undefined ? (+boot.seed >>> 0) : undefined);
 requestAnimationFrame(frame);
 })();
