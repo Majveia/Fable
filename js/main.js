@@ -63,7 +63,7 @@ function loadScenario(i) {
     PhysicsGPU.upload();
     Renderer3D.setSource({
       mode: 'texture',
-      posTex: PhysicsGPU.posTex,
+      posTex: () => PhysicsGPU.posTex,   // ping-pong: identity changes per frame
       count: PhysicsGPU.count,
       massiveCount: PhysicsGPU.massiveCount,
       staticAttribs: PhysicsGPU.staticAttribs,

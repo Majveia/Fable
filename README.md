@@ -2,11 +2,31 @@
 
 A real-time **3D** N-body universe in a single page of vanilla JavaScript.
 No frameworks, no build step, no dependencies. Open `index.html` — or visit
-the live deployment — and you're orbiting ~18,000 gravitating bodies.
+the live deployment — and you're orbiting up to ~500,000 gravitating bodies.
 
 **Live: https://majveia.github.io/Fable/**
 
-![Spiral galaxy seen edge-on](docs/spiral-galaxy.png)
+![Spiral galaxy with a lensing black hole at its core](docs/spiral-galaxy.png)
+
+**v3 — GPU compute, lensing, evolution, scale:**
+- **GPU N-body engine**: the CPU rebuilds a Barnes-Hut octree over the
+  ~15k massive bodies each frame and flattens it into a texture with
+  stackless escape-pointer links; a fragment shader integrates up to
+  **524,288 bodies** against it in parallel. Positions never leave the
+  GPU — the renderer reads them straight from the physics textures.
+  Falls back to the CPU engine automatically.
+- **Gravitational lensing**: screen-space Einstein deflection
+  (β = θ·(1−θE²/θ²)) around up to 8 black holes — photon ring, shadow
+  disc, inverted inner images.
+- **Stellar evolution**: hot stars leave the main sequence, swell into
+  red giants, go supernova, and leave white dwarfs, neutron stars, or
+  black holes that immediately start feeding.
+- **Moons to superclusters**: Earth's Moon, the Galilean moons, and
+  Titan on Hill-stable orbits; a new Supercluster scenario strings ~50
+  dwarf galaxies along cosmic-web filaments (~500k bodies in GPU mode).
+
+![Black hole gravitationally lensing its galaxy](docs/black-hole-lensing.png)
+![Supercluster: dwarf galaxies along cosmic-web filaments](docs/supercluster.png)
 
 ## What's inside
 
@@ -44,7 +64,7 @@ after three seconds and leaves you alone with the universe.
 | drag | orbit |
 | shift-drag / right-drag | pan |
 | scroll / pinch | zoom |
-| `1`–`7` or `←` `→` | scenarios |
+| `1`–`8` or `←` `→` | scenarios |
 | `space` | pause |
 | `[` `]` | time speed |
 | `t` | motion trails |
@@ -61,11 +81,12 @@ render layer (`js/render/`), scenario definitions, and a thin main loop.
 ## Tests
 
 ```sh
-node test/core.test.js   # octree vs brute-force accuracy (1e-15 exact-mode),
-                         # orbit stability, tracer semantics, accretion
-                         # conservation, performance budget
-node test/smoke.js       # every scenario, 300 steps: stability, boundedness,
-                         # per-step budget, massive-only tree builds
+node test/core.test.js      # octree vs brute force (1e-15 exact-mode), orbits,
+                            # tracer semantics, accretion conservation, perf
+node test/treepack.test.js  # GPU tree flattening vs reference traversal
+node test/evolution.test.js # determinism, class ordering, remnants, mass loss
+node test/smoke.js          # every scenario: stability, bounds, perf budget,
+                            # moon-boundness, interleaved evolution
 ```
 
 Both run in CI on every push; deployment to GitHub Pages is automatic.

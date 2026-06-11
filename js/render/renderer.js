@@ -1,25 +1,48 @@
 'use strict';
 /* ============================================================
-   FABLE UNIVERSE v2 — 3D point renderer (globalThis.Renderer3D).
+   FABLE UNIVERSE v3 — 3D point renderer (globalThis.Renderer3D).
 
-   WebGL2, gl.POINTS everywhere, generalizing the proven v1 2D
-   renderer: one dynamic interleaved VBO refreshed per frame from
-   the global Bodies store, premultiplied-alpha trails fade via an
-   attribute-less fullscreen triangle, and v1's piecewise radial
-   glow falloff — now with perspective size attenuation.
+   WebGL2, gl.POINTS everywhere. v3 upgrades on the proven v2
+   renderer (contract: docs/ARCHITECTURE-GPU.md):
+
+   - Two body sources, switched with setSource():
+       'arrays'  (default) — reads the global Bodies store into a
+                 dynamic interleaved VBO per frame, exactly as v2.
+       'texture' — positions+mass live in a GPU RGBA32F texture
+                 (posTex, width 2048, row = id >> 11) written by
+                 PhysicsGPU; the vertex shader texelFetches by
+                 gl_VertexID. rad/colorIdx/type come from a static
+                 VBO built once from staticAttribs; the massive
+                 region [0, massiveCount) is re-uploaded whenever
+                 render opts carry a changed attribsVersion.
+                 posTex.w < 0 = dead slot -> vertex clipped.
+   - Scene-to-FBO pipeline: the scene accumulates in an RGBA16F
+     FBO (RGBA8 fallback) with a depth attachment; trails = no
+     clear + multiplicative fade quad inside the FBO (the old
+     preserveDrawingBuffer trick is gone); PostFX then presents
+     (and gravitationally lenses) the FBO to the screen each frame.
+   - render(opts) gains blackHoles [{x,y,z,mass,rad}] (<= 8 used
+     for lensing) and attribsVersion. Both optional: old callers
+     ({viewProj, eye, lightPos, trails, timeMs}) keep working and
+     mean "arrays mode, no lensing".
 
    Two passes per frame over the body data:
      pass 0 (additive, ONE/ONE): stars, dust, gas haze, black-hole
-            halo rings. Planets discard.
+            halo rings. Planets discard. Depth test off.
      pass 1 (opaque, ONE/ONE_MINUS_SRC_ALPHA, premultiplied):
-            planet sphere impostors and black-hole core discs,
-            painter-sorted back-to-front in JS (< 20 of them).
+            planet sphere impostors and black-hole core discs.
+            arrays mode: painter-sorted back-to-front in JS.
+            texture mode: positions are GPU-side so no CPU sort —
+            depth testing against the FBO depth buffer instead
+            (planets/BHs are at most a few dozen).
 
    A separate static VBO holds ~3000 far background stars on a
    radius-5e5 sphere, drawn first so orbiting gives parallax.
 
-   Interleaved vertex layout (6 floats, stride 24):
+   Interleaved arrays-mode vertex layout (6 floats, stride 24):
      a_pos(vec3) @0 | a_rad @12 | a_colorIdx @16 | a_type @20
+   Texture-mode static layout (3 floats, stride 12):
+     a_rad @0 | a_colorIdx @4 | a_type @8
    ============================================================ */
 (function () {
 
@@ -70,6 +93,48 @@ void main() {
   v_color = u_palette[int(a_colorIdx + 0.5)];
   v_type = a_type;
   v_worldPos = a_pos;
+}`;
+
+  /* Texture-sourced variant: position + mass fetched from posTex
+     (RGBA32F, width 2048, row-major by slot) using gl_VertexID.
+     Dead slots (w < 0) are clipped (position outside the clip
+     volume + point size 0). In the opaque pass (u_pass = 1) every
+     non-planet/non-BH vertex is clipped too, since we cannot
+     pre-filter on the CPU. */
+  const VERT_TEX_SRC = `#version 300 es
+precision highp float;
+layout(location = 0) in float a_rad;
+layout(location = 1) in float a_colorIdx;
+layout(location = 2) in float a_type;
+uniform sampler2D u_posTex;    // xyz = world pos, w = mass (< 0 dead)
+uniform mat4  u_viewProj;
+uniform vec3  u_palette[12];
+uniform float u_sizeScale;
+uniform float u_viewportH;
+uniform float u_dpr;
+uniform float u_maxPointSize;
+uniform float u_pass;
+out vec3  v_color;
+out float v_type;
+out vec3  v_worldPos;
+void main() {
+  ivec2 tc = ivec2(gl_VertexID & 2047, gl_VertexID >> 11);
+  vec4 pm = texelFetch(u_posTex, tc, 0);
+  bool opaqueBody = a_type > 0.5 && a_type < 2.5;   // BH or planet
+  if (pm.w < 0.0 || (u_pass > 0.5 && !opaqueBody)) {
+    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);   // z > w -> clipped away
+    gl_PointSize = 0.0;
+    v_color = vec3(0.0); v_type = 0.0; v_worldPos = vec3(0.0);
+    return;
+  }
+  vec4 clip = u_viewProj * vec4(pm.xyz, 1.0);
+  gl_Position = clip;
+  float w = max(clip.w, 1e-4);
+  float s = clamp(a_rad * u_sizeScale * u_viewportH / w, 1.5, 160.0) * u_dpr;
+  gl_PointSize = min(s, u_maxPointSize);
+  v_color = u_palette[int(a_colorIdx + 0.5)];
+  v_type = a_type;
+  v_worldPos = pm.xyz;
 }`;
 
   // All output is premultiplied alpha. u_pass selects behavior:
@@ -160,9 +225,8 @@ void main() {
   // Trails fade: attribute-less fullscreen triangle. Blended with
   // (ONE, ONE_MINUS_SRC_ALPHA) and premultiplied output it computes
   // dst = bg·fade + dst·(1-fade): a multiplicative fade *toward the
-  // opaque near-black background* instead of toward transparent
-  // black, so the canvas never goes see-through (no CSS backdrop
-  // needed in 3D — the starfield is in-scene).
+  // opaque near-black background*. v3: this runs INSIDE the scene
+  // FBO, so the default framebuffer needs no preserveDrawingBuffer.
   const FADE_VERT_SRC = `#version 300 es
 void main() {
   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
@@ -175,6 +239,18 @@ uniform float u_fade;
 uniform vec3  u_fadeColor;
 out vec4 outColor;
 void main() { outColor = vec4(u_fadeColor * u_fade, u_fade); }`;
+
+  // Minimal present (FBO -> screen) used only when PostFX is not
+  // loaded / failed: clamp + opaque alpha. PostFX normally owns
+  // the present so lensing + tone fold into a single blit.
+  const PRESENT_FRAG_SRC = `#version 300 es
+precision highp float;
+uniform sampler2D u_scene;
+out vec4 outColor;
+void main() {
+  vec3 c = texelFetch(u_scene, ivec2(gl_FragCoord.xy), 0).rgb;
+  outColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}`;
 
   function compile(gl, type, src) {
     const sh = gl.createShader(type);
@@ -201,18 +277,43 @@ void main() { outColor = vec4(u_fadeColor * u_fade, u_fade); }`;
 
   // ---------------------------------------------------------------- state
   let gl = null, canvas = null;
-  let prog = null, fadeProg = null;
-  const uni = {};
+  let progA = null, progT = null, fadeProg = null, presentProg = null;
+  const uniA = {}, uniT = {}, uniF = {}, uniP = {};
   let maxPointSize = 64;
   let cssW = 1, cssH = 1, dprV = 1;
 
   let dynVao = null, dynVbo = null, dynCapFloats = 0;
   let opqVao = null, opqVbo = null, opqCapFloats = 0;
   let bgVao = null, bgVbo = null, bgCount = 0;
+  let texVao = null, texVbo = null, texCapFloats = 0;
 
   let scratch = new Float32Array(0);     // all bodies, additive pass
   let opqScratch = new Float32Array(0);  // planets + BHs, sorted
   let opqOrder = [];                     // reusable {i, d2} records
+
+  // scene render target
+  let fbo = null, sceneTex = null, depthRb = null;
+  let targetFormat = null;               // 'rgba16f' | 'rgba8' | null (direct)
+  let halfFloatRT = false;
+  let pfOK = false;                      // PostFX initialized
+
+  // body source
+  let source = { mode: 'arrays' };
+  let lastAttribsVersion = undefined;
+
+  function bodyUniforms(prog, u) {
+    u.viewProj = gl.getUniformLocation(prog, 'u_viewProj');
+    u.palette = gl.getUniformLocation(prog, 'u_palette');
+    u.sizeScale = gl.getUniformLocation(prog, 'u_sizeScale');
+    u.viewportH = gl.getUniformLocation(prog, 'u_viewportH');
+    u.dpr = gl.getUniformLocation(prog, 'u_dpr');
+    u.maxPointSize = gl.getUniformLocation(prog, 'u_maxPointSize');
+    u.pass = gl.getUniformLocation(prog, 'u_pass');
+    u.alphaScale = gl.getUniformLocation(prog, 'u_alphaScale');
+    u.eye = gl.getUniformLocation(prog, 'u_eye');
+    u.lightPos = gl.getUniformLocation(prog, 'u_lightPos');
+    u.posTex = gl.getUniformLocation(prog, 'u_posTex');  // texture variant only
+  }
 
   function setupAttribs() {
     const stride = FLOATS * 4;
@@ -224,6 +325,16 @@ void main() { outColor = vec4(u_fadeColor * u_fade, u_fade); }`;
     gl.vertexAttribPointer(2, 1, gl.FLOAT, false, stride, 16);
     gl.enableVertexAttribArray(3);
     gl.vertexAttribPointer(3, 1, gl.FLOAT, false, stride, 20);
+  }
+
+  function setupTexAttribs() {
+    const stride = 3 * 4;                // rad, colorIdx, type
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 1, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, stride, 4);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, stride, 8);
   }
 
   function ensureDynCapacity(floats) {
@@ -274,17 +385,199 @@ void main() { outColor = vec4(u_fadeColor * u_fade, u_fade); }`;
     gl.bindVertexArray(null);
   }
 
+  /* (Re)allocate the scene render target at the current canvas size:
+     RGBA16F color (RGBA8 fallback) + DEPTH_COMPONENT24. Returns true
+     if a complete FBO exists; false drops the renderer into a direct
+     emergency path (no trails persistence, no lensing). */
+  function allocTarget() {
+    const w = Math.max(1, canvas.width), h = Math.max(1, canvas.height);
+    if (sceneTex) { gl.deleteTexture(sceneTex); sceneTex = null; }
+    if (depthRb) { gl.deleteRenderbuffer(depthRb); depthRb = null; }
+    if (fbo) { gl.deleteFramebuffer(fbo); fbo = null; }
+    targetFormat = null;
+
+    fbo = gl.createFramebuffer();
+    depthRb = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, depthRb);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+
+    const formats = halfFloatRT ? [gl.RGBA16F, gl.RGBA8] : [gl.RGBA8];
+    for (const fmt of formats) {
+      sceneTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+      // linear so the lensing warp resamples smoothly (16F filtering
+      // is core WebGL2); clamp so warped reads never wrap.
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRb);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
+        targetFormat = (fmt === gl.RGBA16F) ? 'rgba16f' : 'rgba8';
+        gl.clearColor(CLEAR[0], CLEAR[1], CLEAR[2], 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return true;
+      }
+      gl.deleteTexture(sceneTex);
+      sceneTex = null;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return false;
+  }
+
+  /* Full (re)build of the texture-mode static-attribute VBO from
+     source.staticAttribs ([rad, colorIdx, type] × count). */
+  function uploadStaticAttribs() {
+    if (!gl || source.mode !== 'texture' || !source.staticAttribs) return;
+    const floats = source.count * 3;
+    gl.bindVertexArray(texVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, texVbo);
+    if (floats > texCapFloats) {
+      texCapFloats = Math.max(floats, texCapFloats * 2, 4096 * 3);
+      gl.bufferData(gl.ARRAY_BUFFER, texCapFloats * 4, gl.DYNAMIC_DRAW);
+    }
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, source.staticAttribs, 0,
+                     Math.min(floats, source.staticAttribs.length));
+    setupTexAttribs();
+    gl.bindVertexArray(null);
+  }
+
+  /* Per-frame uniforms shared by both body programs. */
+  function setFrameUniforms(u, viewProj, eye, light) {
+    gl.uniformMatrix4fv(u.viewProj, false, viewProj);
+    gl.uniform1f(u.viewportH, cssH);
+    gl.uniform1f(u.dpr, dprV);
+    gl.uniform1f(u.maxPointSize, maxPointSize);
+    gl.uniform3f(u.eye, eye.x, eye.y, eye.z);
+    gl.uniform3f(u.lightPos, light.x, light.y, light.z);
+  }
+
+  /* arrays mode: v2 path — copy Bodies into the dynamic VBO, draw the
+     additive pass, then painter-sort planets/BHs for the opaque pass. */
+  function drawArrayBodies(eye) {
+    const B = globalThis.Bodies;
+    const n = B ? B.n : 0;
+    if (n <= 0) return;
+
+    const floats = n * FLOATS;
+    if (scratch.length < floats) {
+      scratch = new Float32Array(Math.max(floats, scratch.length * 2));
+    }
+    const px = B.px, py = B.py, pz = B.pz, rad = B.rad,
+          ci = B.colorIdx, ty = B.type;
+    let o = 0;
+    opqOrder.length = 0;
+    for (let i = 0; i < n; i++) {
+      scratch[o++] = px[i];
+      scratch[o++] = py[i];
+      scratch[o++] = pz[i];
+      scratch[o++] = rad[i];
+      scratch[o++] = ci[i];
+      scratch[o++] = ty[i];
+      if (ty[i] === 1 || ty[i] === 2) {  // BH or planet -> opaque pass
+        const dx = px[i] - eye.x, dy = py[i] - eye.y, dz = pz[i] - eye.z;
+        opqOrder.push({ i, d2: dx * dx + dy * dy + dz * dz });
+      }
+    }
+
+    ensureDynCapacity(floats);
+    gl.bindVertexArray(dynVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, dynVbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, scratch, 0, floats);
+    gl.uniform1f(uniA.alphaScale, 1.0);
+    gl.drawArrays(gl.POINTS, 0, n);
+
+    // ---- pass 1: opaque impostors, painter-sorted back-to-front ----
+    const opqCount = opqOrder.length;
+    if (opqCount > 0) {
+      opqOrder.sort((a, b) => b.d2 - a.d2);  // far first
+      const ofl = opqCount * FLOATS;
+      if (opqScratch.length < ofl) {
+        opqScratch = new Float32Array(Math.max(ofl, opqScratch.length * 2));
+      }
+      let q = 0;
+      for (let k = 0; k < opqCount; k++) {
+        const i = opqOrder[k].i;
+        opqScratch[q++] = px[i];
+        opqScratch[q++] = py[i];
+        opqScratch[q++] = pz[i];
+        opqScratch[q++] = rad[i];
+        opqScratch[q++] = ci[i];
+        opqScratch[q++] = ty[i];
+      }
+      ensureOpqCapacity(ofl);
+      gl.bindVertexArray(opqVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, opqVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, opqScratch, 0, ofl);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);  // premultiplied over
+      gl.uniform1f(uniA.pass, 1);
+      gl.uniform1f(uniA.sizeScale, 2.2);  // solid body, no glow margin
+      gl.drawArrays(gl.POINTS, 0, opqCount);
+    }
+  }
+
+  /* texture mode: both passes draw all `count` slots; the vertex
+     shader clips dead slots, and (pass 1) everything that is not a
+     planet/BH. Opaque pass uses the depth buffer instead of a CPU
+     painter sort (positions live on the GPU). */
+  function drawTextureBodies(opts, viewProj, eye, light) {
+    const s = source;
+    // posTex may be a getter: ping-pong engines swap textures per frame.
+    const posTex = typeof s.posTex === 'function' ? s.posTex() : s.posTex;
+    if (!posTex || s.count <= 0) return;
+
+    gl.useProgram(progT);
+    setFrameUniforms(uniT, viewProj, eye, light);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, posTex);
+    gl.uniform1i(uniT.posTex, 0);
+
+    // engine bumped attribsVersion -> re-upload the massive region
+    if (opts.attribsVersion !== undefined &&
+        opts.attribsVersion !== lastAttribsVersion) {
+      lastAttribsVersion = opts.attribsVersion;
+      if (s.staticAttribs && s.massiveCount > 0) {
+        const floats = Math.min(s.massiveCount, s.count) * 3;
+        gl.bindBuffer(gl.ARRAY_BUFFER, texVbo);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, s.staticAttribs, 0,
+                         Math.min(floats, s.staticAttribs.length));
+      }
+    }
+
+    gl.bindVertexArray(texVao);
+
+    // ---- pass 0: additive ----
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.uniform1f(uniT.pass, 0);
+    gl.uniform1f(uniT.sizeScale, 6.0);
+    gl.uniform1f(uniT.alphaScale, 1.0);
+    gl.drawArrays(gl.POINTS, 0, s.count);
+
+    // ---- pass 1: opaque, depth-tested ----
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.uniform1f(uniT.pass, 1);
+    gl.uniform1f(uniT.sizeScale, 2.2);
+    gl.drawArrays(gl.POINTS, 0, s.count);
+    gl.disable(gl.DEPTH_TEST);
+  }
+
   const Renderer3D = {
 
     init(cnv) {
       canvas = cnv;
       try {
         gl = canvas.getContext('webgl2', {
-          alpha: true,
+          alpha: false,
           premultipliedAlpha: true,
-          preserveDrawingBuffer: true,   // trails accumulate in the backbuffer
+          preserveDrawingBuffer: false,  // trails now live in the scene FBO
           antialias: false,
-          depth: false,
+          depth: false,                  // depth is an FBO attachment
           stencil: false,
         });
       } catch (e) {
@@ -293,50 +586,84 @@ void main() { outColor = vec4(u_fadeColor * u_fade, u_fade); }`;
       if (!gl || typeof gl.createShader !== 'function') return null;
 
       try {
-        prog = link(gl, VERT_SRC, FRAG_SRC);
+        progA = link(gl, VERT_SRC, FRAG_SRC);
+        progT = link(gl, VERT_TEX_SRC, FRAG_SRC);
         fadeProg = link(gl, FADE_VERT_SRC, FADE_FRAG_SRC);
+        presentProg = link(gl, FADE_VERT_SRC, PRESENT_FRAG_SRC);
       } catch (e) {
         return null;
       }
 
-      uni.viewProj = gl.getUniformLocation(prog, 'u_viewProj');
-      uni.palette = gl.getUniformLocation(prog, 'u_palette');
-      uni.sizeScale = gl.getUniformLocation(prog, 'u_sizeScale');
-      uni.viewportH = gl.getUniformLocation(prog, 'u_viewportH');
-      uni.dpr = gl.getUniformLocation(prog, 'u_dpr');
-      uni.maxPointSize = gl.getUniformLocation(prog, 'u_maxPointSize');
-      uni.pass = gl.getUniformLocation(prog, 'u_pass');
-      uni.alphaScale = gl.getUniformLocation(prog, 'u_alphaScale');
-      uni.eye = gl.getUniformLocation(prog, 'u_eye');
-      uni.lightPos = gl.getUniformLocation(prog, 'u_lightPos');
-      uni.fade = gl.getUniformLocation(fadeProg, 'u_fade');
-      uni.fadeColor = gl.getUniformLocation(fadeProg, 'u_fadeColor');
+      bodyUniforms(progA, uniA);
+      bodyUniforms(progT, uniT);
+      uniF.fade = gl.getUniformLocation(fadeProg, 'u_fade');
+      uniF.fadeColor = gl.getUniformLocation(fadeProg, 'u_fadeColor');
+      uniP.scene = gl.getUniformLocation(presentProg, 'u_scene');
 
       const range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
       maxPointSize = (range && range[1]) ? range[1] : 64;
 
-      // palette is constant — upload once
+      // half-float color rendering (for the RGBA16F scene target)
+      halfFloatRT = !!(gl.getExtension('EXT_color_buffer_float') ||
+                       gl.getExtension('EXT_color_buffer_half_float'));
+
+      // palette is constant — upload once per program
       const pal = new Float32Array(36);
       for (let i = 0; i < 12; i++) {
         pal[i * 3] = PALETTE[i][0] / 255;
         pal[i * 3 + 1] = PALETTE[i][1] / 255;
         pal[i * 3 + 2] = PALETTE[i][2] / 255;
       }
-      gl.useProgram(prog);
-      gl.uniform3fv(uni.palette, pal);
+      gl.useProgram(progA);
+      gl.uniform3fv(uniA.palette, pal);
+      gl.useProgram(progT);
+      gl.uniform3fv(uniT.palette, pal);
 
       dynVao = gl.createVertexArray(); dynVbo = gl.createBuffer();
       opqVao = gl.createVertexArray(); opqVbo = gl.createBuffer();
       bgVao = gl.createVertexArray(); bgVbo = gl.createBuffer();
+      texVao = gl.createVertexArray(); texVbo = gl.createBuffer();
       ensureDynCapacity(1);
       ensureOpqCapacity(1);
       buildBackground();
 
       gl.disable(gl.DEPTH_TEST);
       gl.enable(gl.BLEND);
-      gl.clearColor(CLEAR[0], CLEAR[1], CLEAR[2], 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+      allocTarget();
+
+      // PostFX owns the present pass (lensing + tone) when loaded.
+      // init is idempotent so the integrator may also call it.
+      const pf = globalThis.PostFX;
+      pfOK = !!(pf && pf.init && pf.init(gl));
+      if (pfOK) pf.resize(cssW, cssH, dprV);
+
+      this.gl = gl;                      // shared context (PhysicsGPU et al.)
+      this.targetFormat = targetFormat;
       return 'webgl2';
+    },
+
+    /* Select the body source.
+       setSource({ mode:'arrays' })  -> read globalThis.Bodies (default)
+       setSource({ mode:'texture', posTex, count, massiveCount,
+                   staticAttribs })  -> positions from posTex by slot;
+       rebuilds the static VBO, resets attribsVersion tracking. */
+    setSource(spec) {
+      if (!spec || !spec.mode || spec.mode === 'arrays') {
+        source = { mode: 'arrays' };
+        return;
+      }
+      if (spec.mode !== 'texture') {
+        throw new Error('Renderer3D.setSource: unknown mode ' + spec.mode);
+      }
+      source = {
+        mode: 'texture',
+        posTex: spec.posTex,
+        count: spec.count | 0,
+        massiveCount: spec.massiveCount | 0,
+        staticAttribs: spec.staticAttribs,
+      };
+      lastAttribsVersion = undefined;
+      uploadStaticAttribs();
     },
 
     resize(w, h, dpr) {
@@ -345,112 +672,87 @@ void main() { outColor = vec4(u_fadeColor * u_fade, u_fade); }`;
       dprV = dpr || 1;
       canvas.width = Math.max(1, Math.round(w * dprV));
       canvas.height = Math.max(1, Math.round(h * dprV));
-      if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+      if (gl) {
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        allocTarget();
+        this.targetFormat = targetFormat;
+        if (pfOK) globalThis.PostFX.resize(cssW, cssH, dprV);
+      }
     },
 
-    /* render({ viewProj, eye, lightPos, trails, timeMs }) — reads the
-       global Bodies store directly. */
+    /* render({ viewProj, eye, lightPos, trails, timeMs,
+                blackHoles, attribsVersion })
+       blackHoles: [{x,y,z,mass,rad}] — up to 8 used for lensing.
+       attribsVersion: change triggers a massive-region attrib
+       re-upload in texture mode. Both optional (v2 callers OK). */
     render(opts) {
       if (!gl) return;
-      const B = globalThis.Bodies;
       const viewProj = opts.viewProj;
       const eye = opts.eye || { x: 0, y: 0, z: 0 };
       const light = opts.lightPos || { x: 0, y: 1e4, z: 0 };
       const trails = !!opts.trails;
+      const haveTarget = !!targetFormat;
 
+      gl.bindFramebuffer(gl.FRAMEBUFFER, haveTarget ? fbo : null);
       gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.enable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+      gl.depthMask(true);
 
-      // ---- background fade / clear ----
-      if (trails) {
+      // ---- background fade / clear (depth always clears) ----
+      if (trails && haveTarget) {
+        gl.clear(gl.DEPTH_BUFFER_BIT);
         gl.useProgram(fadeProg);
-        gl.uniform1f(uni.fade, TRAIL_FADE);
-        gl.uniform3f(uni.fadeColor, CLEAR[0], CLEAR[1], CLEAR[2]);
+        gl.uniform1f(uniF.fade, TRAIL_FADE);
+        gl.uniform3f(uniF.fadeColor, CLEAR[0], CLEAR[1], CLEAR[2]);
         gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
       } else {
         gl.clearColor(CLEAR[0], CLEAR[1], CLEAR[2], 1);
-        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.clear(gl.COLOR_BUFFER_BIT | (haveTarget ? gl.DEPTH_BUFFER_BIT : 0));
       }
 
-      gl.useProgram(prog);
-      gl.uniformMatrix4fv(uni.viewProj, false, viewProj);
-      gl.uniform1f(uni.viewportH, cssH);
-      gl.uniform1f(uni.dpr, dprV);
-      gl.uniform1f(uni.maxPointSize, maxPointSize);
-      gl.uniform3f(uni.eye, eye.x, eye.y, eye.z);
-      gl.uniform3f(uni.lightPos, light.x, light.y, light.z);
-
-      // ---- pass 0: additive (background stars first, then bodies) ----
+      // ---- pass 0: additive — background stars first ----
+      gl.useProgram(progA);
+      setFrameUniforms(uniA, viewProj, eye, light);
       gl.blendFunc(gl.ONE, gl.ONE);
-      gl.uniform1f(uni.pass, 0);
-      gl.uniform1f(uni.sizeScale, 6.0);   // glow extends past the body
+      gl.uniform1f(uniA.pass, 0);
+      gl.uniform1f(uniA.sizeScale, 6.0);   // glow extends past the body
 
       // Static far starfield. In trails mode these would accumulate
       // (steady state ≈ alpha/fade), so pre-dim by the fade factor.
-      gl.uniform1f(uni.alphaScale, trails ? 0.55 * TRAIL_FADE : 0.55);
+      gl.uniform1f(uniA.alphaScale, trails ? 0.55 * TRAIL_FADE : 0.55);
       gl.bindVertexArray(bgVao);
       gl.drawArrays(gl.POINTS, 0, bgCount);
 
-      const n = B ? B.n : 0;
-      let opqCount = 0;
-      if (n > 0) {
-        const floats = n * FLOATS;
-        if (scratch.length < floats) {
-          scratch = new Float32Array(Math.max(floats, scratch.length * 2));
-        }
-        const px = B.px, py = B.py, pz = B.pz, rad = B.rad,
-              ci = B.colorIdx, ty = B.type;
-        let o = 0;
-        opqOrder.length = 0;
-        for (let i = 0; i < n; i++) {
-          scratch[o++] = px[i];
-          scratch[o++] = py[i];
-          scratch[o++] = pz[i];
-          scratch[o++] = rad[i];
-          scratch[o++] = ci[i];
-          scratch[o++] = ty[i];
-          if (ty[i] === 1 || ty[i] === 2) {  // BH or planet → opaque pass
-            const dx = px[i] - eye.x, dy = py[i] - eye.y, dz = pz[i] - eye.z;
-            opqOrder.push({ i, d2: dx * dx + dy * dy + dz * dz });
-          }
-        }
-
-        ensureDynCapacity(floats);
-        gl.bindVertexArray(dynVao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, dynVbo);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, scratch, 0, floats);
-        gl.uniform1f(uni.alphaScale, 1.0);
-        gl.drawArrays(gl.POINTS, 0, n);
-
-        // ---- pass 1: opaque impostors, painter-sorted back-to-front ----
-        opqCount = opqOrder.length;
-        if (opqCount > 0) {
-          opqOrder.sort((a, b) => b.d2 - a.d2);  // far first
-          const ofl = opqCount * FLOATS;
-          if (opqScratch.length < ofl) {
-            opqScratch = new Float32Array(Math.max(ofl, opqScratch.length * 2));
-          }
-          let q = 0;
-          for (let k = 0; k < opqCount; k++) {
-            const i = opqOrder[k].i;
-            opqScratch[q++] = px[i];
-            opqScratch[q++] = py[i];
-            opqScratch[q++] = pz[i];
-            opqScratch[q++] = rad[i];
-            opqScratch[q++] = ci[i];
-            opqScratch[q++] = ty[i];
-          }
-          ensureOpqCapacity(ofl);
-          gl.bindVertexArray(opqVao);
-          gl.bindBuffer(gl.ARRAY_BUFFER, opqVbo);
-          gl.bufferSubData(gl.ARRAY_BUFFER, 0, opqScratch, 0, ofl);
-          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);  // premultiplied over
-          gl.uniform1f(uni.pass, 1);
-          gl.uniform1f(uni.sizeScale, 2.2);  // solid body, no glow margin
-          gl.drawArrays(gl.POINTS, 0, opqCount);
-        }
+      if (source.mode === 'texture') {
+        drawTextureBodies(opts, viewProj, eye, light);
+      } else {
+        drawArrayBodies(eye);
       }
       gl.bindVertexArray(null);
+
+      // ---- present: FBO -> default framebuffer (lensing lives here) ----
+      if (!haveTarget) return;           // emergency direct path
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      const pf = globalThis.PostFX;
+      if (pfOK && pf) {
+        pf.apply(sceneTex, {
+          blackHoles: opts.blackHoles,
+          viewProj,
+          viewportH: cssH,
+          dpr: dprV,
+        });
+      } else {
+        gl.disable(gl.BLEND);
+        gl.useProgram(presentProg);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+        gl.uniform1i(uniP.scene, 0);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.enable(gl.BLEND);
+      }
     },
   };
 

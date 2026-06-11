@@ -6,7 +6,7 @@
    ============================================================ */
 
 (function () {
-  const CAP = 1 << 17;
+  const CAP = 1 << 19;   // GPU mode stages up to 524k bodies here before upload
 
   const Bodies = {
     // -------- type constants (shared contract) --------
