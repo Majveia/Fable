@@ -24,22 +24,44 @@ function bailToWebGL(e) {
   location.reload();
 }
 
+let _wgpuDevice = null;
 if (!noWebGPU && globalThis.WGPU && globalThis.PhysicsWGPU && globalThis.RendererWGPU) {
-  try {
-    const w = await WGPU.boot(canvas);
-    if (w) {
-      const cap = Math.min(w.maxBodiesCap || (1 << 21), 1 << 21);
-      if (PhysicsWGPU.init(w, { maxBodies: cap }) && RendererWGPU.init(w)) {
-        renderer = RendererWGPU; engine = PhysicsWGPU;
-        wgpuOK = true; modeTag = 'webgpu'; MAX_BODIES = cap;
-        Bodies.ensureCap(cap);
-      }
+  // Boot WebGPU on a DETACHED canvas: the visible canvas is swapped in
+  // only after the device, both inits, AND a GPU validation scope all
+  // succeed. Any failure — including a hung requestAdapter/requestDevice,
+  // via the timeout — leaves the visible canvas pristine for WebGL.
+  // (WGSL errors never throw in JS; the validation scope catches them.)
+  const tryWebGPU = async () => {
+    const probe = document.createElement('canvas');
+    const w = await WGPU.boot(probe);
+    if (!w) return null;
+    const cap = Math.min(w.maxBodiesCap || (1 << 21), 1 << 21);
+    w.device.pushErrorScope('validation');
+    const inited = PhysicsWGPU.init(w, { maxBodies: cap }) && RendererWGPU.init(w);
+    const vErr = await w.device.popErrorScope();
+    if (!inited || vErr) {
+      if (vErr) console.warn('WebGPU validation failed at init:', vErr.message);
+      return null;
     }
-  } catch (e) { console.warn('WebGPU boot failed, falling back:', e); }
-  if (!wgpuOK) {
-    const fresh = canvas.cloneNode(false);
-    canvas.replaceWith(fresh);
-    canvas = fresh;
+    return { w, probe, cap };
+  };
+  let got = null;
+  try {
+    got = await Promise.race([
+      tryWebGPU().catch((e) => { console.warn('WebGPU boot threw:', e); return null; }),
+      new Promise((res) => setTimeout(() => res(null), 5000)),
+    ]);
+  } catch (e) { console.warn('WebGPU attempt failed:', e); }
+  if (got) {
+    got.probe.id = 'space';
+    canvas.replaceWith(got.probe);
+    canvas = got.probe;
+    renderer = RendererWGPU; engine = PhysicsWGPU;
+    wgpuOK = true; modeTag = 'webgpu'; MAX_BODIES = got.cap;
+    Bodies.ensureCap(got.cap);
+    _wgpuDevice = got.w.device;
+  } else {
+    console.warn('WebGPU unavailable or failed validation - using WebGL');
   }
 }
 
@@ -74,6 +96,13 @@ let probation = wgpuOK;
 if (probation) {
   window.addEventListener('error', (e) => { if (probation) bailToWebGL(e.error || e.message); });
   window.addEventListener('unhandledrejection', (e) => { if (probation) bailToWebGL(e.reason); });
+  // Runtime GPU validation errors (e.g. an invalid pipeline used in a
+  // draw) surface here, never as JS exceptions.
+  if (_wgpuDevice && typeof _wgpuDevice.addEventListener === 'function') {
+    _wgpuDevice.addEventListener('uncapturederror', (e) => {
+      if (probation) bailToWebGL((e.error && e.error.message) || 'uncaptured GPU error');
+    });
+  }
 }
 try {
   resize();
@@ -390,7 +419,7 @@ function frame(now) {
         blackHoles: engine.blackHoleList(),
         attribsVersion: engine.attribsVersion || 0,
       });
-      if (frameNo > 180) probation = false;       // survived: trust it
+      if (frameNo > 300) probation = false;       // survived ~5 s: trust it
     } catch (e) { bailToWebGL(e); return; }
     Camera3D.update(dtMs);
     engine.adaptQuality(fpsSmooth);

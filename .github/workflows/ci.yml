@@ -50,3 +50,5 @@ jobs:
           npx playwright install --with-deps chromium
       - name: WebGPU engine (self-skips without an adapter)
         run: node test/wgpu.browser.test.js
+      - name: Black-screen insurance (all WebGPU failure modes)
+        run: node test/fallback.browser.test.js
