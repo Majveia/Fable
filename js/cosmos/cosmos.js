@@ -41,8 +41,23 @@ const MOONS_MIN = 0, MOONS_MAX = 4;
 const UNIVERSE_RADIUS = 6000;   // ~6000-radius cosmic-web volume
 const N_FILAMENTS_MIN = 3;      // 3-4 filaments through the volume
 const GALAXY_RADIUS_MIN = 120, GALAXY_RADIUS_MAX = 260; // mirrors supercluster
-const SYSTEM_RADIUS = 1.6;      // a system's spatial extent (orbital reach)
-const PLANET_RADIUS = 0.08;     // a planet's spatial extent (moon reach)
+
+// Two radii per node, decoupled (this is what makes continuous flight
+// across ~10^3-per-level scale jumps coherent — see the LOD note below):
+//   radius      = DESCEND capture size: how close (camera→node.ac) you must
+//                 come, while flying in the PARENT, to drop into this node.
+//                 Sized so it is reachable among the parent's visible content.
+//   viewRadius  = the node's own POPULATED interior extent: what you fly
+//                 among once it is active. Drives ASCEND and camera framing.
+// They live on different scales on purpose; the descend handoff rebases the
+// origin and reframes the camera, so the scale jump reads as a smooth zoom
+// (the standard space-sim trick — Elite/Space Engine do exactly this).
+const UNIVERSE_VIEW  = 6500;
+const GALAXY_VIEW    = 1500, GALAXY_CAPTURE = 800;
+const SYSTEM_VIEW    = 1100, SYSTEM_CAPTURE = 90;
+const PLANET_VIEW    = 40,   PLANET_CAPTURE = 60;
+const GAL_DISK_R     = 900;  // populated galaxy disk radius (popGalaxy makeGalaxy)
+const SYS_A0 = 60, SYS_DA = 105; // planet orbital radii: a_k = SYS_A0 + k*SYS_DA
 
 /* ---------------------------------------------------------------
    FNV-1a 32-bit string hash. Deterministic, fast, well-mixed —
@@ -121,13 +136,14 @@ const NodeProto = {
   },
 };
 
-function makeNode(id, kind, depth, ac, radius, parent, summary, seed) {
+function makeNode(id, kind, depth, ac, radius, parent, summary, seed, viewRadius) {
   const n = Object.create(NodeProto);
   n.id = id;
   n.kind = kind;
   n.depth = depth;
   n.ac = ac;                 // [x,y,z] absolute float64 center
-  n.radius = radius;
+  n.radius = radius;         // DESCEND capture size (in the parent's frame)
+  n.viewRadius = viewRadius || radius;  // populated interior extent (when active)
   n.parent = parent;
   n.phase = 0;               // analytic state at Cosmos.clockMyr (set by ageTo)
   n.summary = summary;       // { colorIdx, brightness, kind }
@@ -166,14 +182,15 @@ function genGalaxies(root) {
     const cx = root.ac[0] + f.off[0] + f.dir[0] * t + gauss() * 380;
     const cy = root.ac[1] + f.off[1] + f.dir[1] * t + gauss() * 380;
     const cz = root.ac[2] + f.off[2] + f.dir[2] * t + gauss() * 380;
-    const radius = rand(GALAXY_RADIUS_MIN, GALAXY_RADIUS_MAX);
+    void GALAXY_RADIUS_MIN; void GALAXY_RADIUS_MAX;   // (web spacing only)
     const id = root.id + '/g' + k;
     const summary = {
       colorIdx: B.starColor ? starColorIdx(r) : 5,
       brightness: rand(0.5, 1.0),
       kind: KIND_GALAXY,
     };
-    kids[k] = makeNode(id, KIND_GALAXY, 1, [cx, cy, cz], radius, root, summary, root._seed);
+    kids[k] = makeNode(id, KIND_GALAXY, 1, [cx, cy, cz], GALAXY_CAPTURE, root,
+                       summary, root._seed, GALAXY_VIEW);
   }
   return kids;
 }
@@ -186,16 +203,16 @@ function genSystems(gal) {
   const r = gal.rng();
   const rand = (a, b) => a + r() * (b - a);
 
-  // The galaxy disk orientation: a tilt + azimuth, like makeGalaxy uses.
-  const tilt = rand(0, Math.PI);
-  const az = rand(0, 2 * Math.PI);
-  const [nx, ny, nz] = B.unitNormalFromTilt(tilt, az);
+  // Match popGalaxy's disk plane (fixed tilt 0.35, azimuth 0 at phase 0) so
+  // the visitable systems sit AMONG the galaxy's visible stars (the populated
+  // disk has radius GAL_DISK_R), not in some unrelated plane.
+  const [nx, ny, nz] = B.unitNormalFromTilt(0.35, 0);
   const [ux, uy, uz, vx, vy, vz] = B.basisFor(nx, ny, nz);
 
   const kids = new Array(N_SYSTEMS);
   for (let k = 0; k < N_SYSTEMS; k++) {
-    // orbital radius within the disk (avoid the bright core, stay in radius)
-    const orad = rand(gal.radius * 0.12, gal.radius * 0.92);
+    // orbital radius across the populated disk (avoid the bright core)
+    const orad = rand(GAL_DISK_R * 0.18, GAL_DISK_R * 0.95);
     const theta = rand(0, 2 * Math.PI);
     const ct = Math.cos(theta), st = Math.sin(theta);
     const cx = gal.ac[0] + (ux * ct + vx * st) * orad;
@@ -207,7 +224,8 @@ function genSystems(gal) {
       brightness: rand(0.6, 1.0),
       kind: KIND_SYSTEM,
     };
-    kids[k] = makeNode(id, KIND_SYSTEM, 2, [cx, cy, cz], SYSTEM_RADIUS, gal, summary, gal._seed);
+    kids[k] = makeNode(id, KIND_SYSTEM, 2, [cx, cy, cz], SYSTEM_CAPTURE, gal,
+                       summary, gal._seed, SYSTEM_VIEW);
   }
   return kids;
 }
@@ -227,10 +245,11 @@ function genPlanets(sys) {
   const [ux, uy, uz, vx, vy, vz] = B.basisFor(nx, ny, nz);
 
   const kids = new Array(nPlanets);
-  // Planets spaced out from the star within the system radius.
+  // Planet k sits at orbital radius a_k = SYS_A0 + k*SYS_DA — EXACTLY where
+  // popSystem renders it — so the dot you fly toward IS the rendered planet.
+  // popSystem reads these node positions back (planetNode.ac - sys.ac).
   for (let k = 0; k < nPlanets; k++) {
-    const frac = (k + 1) / (nPlanets + 1);
-    const orad = SYSTEM_RADIUS * (0.18 + frac * 0.74) * rand(0.92, 1.08);
+    const orad = SYS_A0 + k * SYS_DA;
     const theta = rand(0, 2 * Math.PI);
     const ct = Math.cos(theta), st = Math.sin(theta);
     const cx = sys.ac[0] + (ux * ct + vx * st) * orad;
@@ -242,7 +261,8 @@ function genPlanets(sys) {
       brightness: rand(0.3, 0.8),
       kind: KIND_PLANET,
     };
-    kids[k] = makeNode(id, KIND_PLANET, 3, [cx, cy, cz], PLANET_RADIUS, sys, summary, sys._seed);
+    kids[k] = makeNode(id, KIND_PLANET, 3, [cx, cy, cz], PLANET_CAPTURE, sys,
+                       summary, sys._seed, PLANET_VIEW);
   }
   return kids;
 }
@@ -396,21 +416,29 @@ function popSystem(node, budget, out) {
     ];
   };
 
-  // Planet count from the node's own children() so the visitable nodes
-  // line up with what we draw live (same per-system rng).
+  // Render each planet AT ITS NODE POSITION so the dot you flew toward in
+  // the galaxy view is the very planet you now see (planet nodes are placed
+  // at a_k = SYS_A0 + k*SYS_DA; their ac-relative-to-system is the local
+  // position). Velocity = circular orbit in the plane of that position,
+  // with node.phase rotating the whole system rigidly about Y.
   const planetNodes = node.children();
-  const planetState = [];
+  const cph = Math.cos(phase), sph = Math.sin(phase);
   for (let k = 0; k < planetNodes.length; k++) {
-    const a = 60 + k * 105 + rand(-8, 8);
+    const pn = planetNodes[k];
+    // local position of the planet relative to the system center
+    let lx = pn.ac[0] - node.ac[0], ly = pn.ac[1] - node.ac[1], lz = pn.ac[2] - node.ac[2];
+    // rigid system rotation about Y by phase (re-entry after aging continuous)
+    const rx = lx * cph - lz * sph, rz = lx * sph + lz * cph;
+    lx = rx; lz = rz;
+    const a = Math.sqrt(lx * lx + ly * ly + lz * lz) || 1;
     const m = rand(1, 90);
     const rv = rand(2.0, 7.6);
-    const c = (1 + ((rand(0, 6))) | 0);
-    const inc = rand(0, 6);
-    // anomaly carries node.phase so the system rotates with the clock
-    const anom = (rand(0, 2 * Math.PI) + phase) % (2 * Math.PI);
-    const s = orbit(a, inc, rand(0, 6.28), anom);
-    out.add(s[0], s[1], s[2], s[3], s[4], s[5], m, rv, c, TYPE_PLANET, 'Planet' + k);
-    planetState.push([s[0], s[1], s[2], s[3], s[4], s[5], m]);
+    const c = pn.summary ? pn.summary.colorIdx : (1 + ((rand(0, 6)) | 0));
+    // circular-orbit speed; direction perpendicular to radius, in XZ-ish plane
+    const v = Math.sqrt(SUN / a);
+    const hx = -lz, hz = lx;                     // tangent in the XZ plane
+    const hl = Math.hypot(hx, hz) || 1;
+    out.add(lx, ly, lz, hx / hl * v, 0, hz / hl * v, m, rv, c, TYPE_PLANET, pn.id);
   }
 
   // Asteroid belt: low-inclination scatter, scaled to budget like solar.
@@ -498,7 +526,8 @@ const Cosmos = {
     this.seed = s;
     this.clockMyr = 0;
     const summary = { colorIdx: 5, brightness: 1.0, kind: KIND_UNIVERSE };
-    const root = makeNode('u', KIND_UNIVERSE, 0, [0, 0, 0], UNIVERSE_RADIUS, null, summary, s);
+    const root = makeNode('u', KIND_UNIVERSE, 0, [0, 0, 0], UNIVERSE_RADIUS, null,
+                          summary, s, UNIVERSE_VIEW);
     this.root = root;
     return root;
   },

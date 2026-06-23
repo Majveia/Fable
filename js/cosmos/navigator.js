@@ -171,8 +171,13 @@
 
       // Only consider one transition per frame; debounce gates switches.
       if (this._debounce === 0) {
-        // ASCEND: camera well outside the active node -> go to parent.
-        if (a.parent && D > a.radius * ASCEND_FACTOR) {
+        // ASCEND: camera well outside the active node's INTERIOR extent ->
+        // go to parent. viewRadius is the populated scale you fly among;
+        // radius (the as-a-child capture size) is far smaller, so ascend
+        // must key off viewRadius or you'd be ejected instantly. Falls back
+        // to radius when viewRadius is absent (Navigator's own unit tests).
+        const interior = a.viewRadius || a.radius;
+        if (a.parent && D > interior * ASCEND_FACTOR) {
           this._rebase(a.parent);
           changed = true;
         } else {
