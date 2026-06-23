@@ -458,4 +458,16 @@ def('binary', 'BINARY BLACK HOLES', (budget = DEF_BUDGET) => {
 });
 
 globalThis.Scenarios = Scenarios;
+
+// Generator primitives for the persistent Cosmos (v6) to reuse — exposing
+// these changes no scenario behavior. Cosmos installs its own seeded RNG
+// via setRng so node populations are deterministic from the node id.
+globalThis.Builders = {
+  makeGalaxy,                 // ({cx,cy,cz,cvx,cvy,cvz,stars,dust,gas,radius,bhMass,tilt...})
+  mulberry32,                 // seedable RNG factory
+  starColor, basisFor, unitNormalFromTilt, gauss, rand,
+  setRng(fn) { _rng = fn; },  // drive the module RNG (rand/gauss/makeGalaxy use it)
+  resetRng() { _rng = Math.random; },
+  TYPE_STAR, TYPE_BH, TYPE_PLANET, TYPE_DUST, TYPE_GAS,
+};
 })();
