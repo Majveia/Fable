@@ -345,17 +345,21 @@ function popGalaxy(node, budget, out) {
   const B = Builders();
   const g = budget.gpu;
   const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
-  // node.phase folds into the disk azimuth -> initial angular position of
-  // every star/dust/gas orbit is offset by phase (makeGalaxy adds
-  // r/radius*3.2 to a per-arm base angle; an azimuth shift rotates the
-  // whole disk rigidly, which is exactly the analytic rotation we age).
+  // PHASE CONTINUITY: node.phase rotates the disk rigidly about the Y axis.
+  // makeGalaxy orients the disk via unitNormalFromTilt(tilt, azimuth):
+  // with a NONZERO tilt, sweeping `azimuth` rotates the disk's normal (its
+  // angular-momentum vector) about Y — i.e. a rigid rotation of the whole
+  // disk. So azimuthRad = GAL_TILT_AZ_BASE + node.phase makes a galaxy
+  // re-entered at phase=pi land half a turn around vs phase=0, keeping
+  // re-entry after analytic aging continuous. (A face-on tilt=0 disk would
+  // be azimuth-invariant, so we use a fixed small tilt.)
   B.makeGalaxy({
     cx: 0, cy: 0, cz: 0, cvx: 0, cvy: 0, cvz: 0,
     stars: g ? 12000 : 4600,
     dust: g ? 128000 * X : 9000,
     gas: g ? 5000 * Math.min(X, 2) : 600,
     radius: 900, bhMass: 40000,
-    tiltRad: 0.0, azimuthRad: node.phase, spinDir: 1,
+    tiltRad: 0.35, azimuthRad: node.phase, spinDir: 1,
   });
   return {
     cfg: { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 },
