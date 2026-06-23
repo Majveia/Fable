@@ -18,6 +18,12 @@ jobs:
         run: node test/treepack.test.js
       - name: Stellar evolution tests
         run: node test/evolution.test.js
+      - name: Cosmos generation + aging tests
+        run: node test/cosmos.test.js
+      - name: Navigator (floating origin + LOD) tests
+        run: node test/navigator.test.js
+      - name: Persistence (aging clock) tests
+        run: node test/persist.test.js
       - name: Scenario smoke test
         run: node test/smoke.js
 
@@ -35,6 +41,8 @@ jobs:
           npx playwright install --with-deps chromium
       - name: GPU engine in headless Chromium
         run: node test/gpu.browser.test.js
+      - name: Persistent universe fly-through in headless Chromium
+        run: node test/cosmos.browser.test.js
 
   webgpu-smoke:
     runs-on: ubuntu-latest

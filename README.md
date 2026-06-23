@@ -10,6 +10,24 @@ the engine picks the best your browser offers and falls back gracefully.
 
 ![Spiral galaxy with a lensing black hole at its core](docs/spiral-galaxy.png)
 
+**v6 — the persistent universe:**
+- **One seed, one continuous cosmos.** Instead of picking scenarios, you
+  fly — Universe → Galaxy → Star System → Planet → moons — in one
+  unbroken flight. Zoom in to enter a galaxy / star / planet; zoom out to
+  leave. A deterministic generator (`js/cosmos/cosmos.js`) lazily grows
+  ~50 galaxies along cosmic-web filaments, ~12 visitable systems each,
+  planets, and moons — reproducible from the seed across machines.
+- **Floating origin + LOD** (`js/cosmos/navigator.js`): exactly one node
+  is live-simulated at full fidelity while everything else is analytic
+  context, and the world re-centers on it so float32 precision survives
+  from supercluster scale down to a moon. Verified in Chromium: a flight
+  Universe→Galaxy→System→Planet keeps the local camera under ~10³ units.
+- **It ages while you're away** (`js/cosmos/persist.js`): the universe is
+  saved (seed + clock) to IndexedDB; time elapsed between visits advances
+  the cosmos (galaxies rotate, stars evolve) — 1 real hour ≈ 200 Myr.
+  The old eight scenarios remain as a **sandbox** (keys `1`–`8`); the
+  universe is the default (`u`, or the leading dot).
+
 **v5 — WebGPU compute:**
 - **WGSL compute engine** (`js/webgpu/`): the proven Barnes-Hut kernel as
   a real compute shader over storage buffers — in-place integration (no
@@ -117,8 +135,14 @@ node test/treepack.test.js  # GPU tree flattening vs reference traversal
 node test/evolution.test.js # determinism, class ordering, remnants, mass loss
 node test/smoke.js          # every scenario: stability, bounds, perf budget,
                             # moon-boundness, interleaved evolution
-node test/gpu.browser.test.js  # REAL GPU engine in headless Chromium:
-                               # analytic orbit accuracy, all scenarios
+node test/cosmos.test.js       # procedural hierarchy: determinism, laziness,
+                               # aging, populate bounds, phase continuity
+node test/navigator.test.js    # floating origin + LOD: descent/ascent
+                               # sequence, bounded local coords, no flapping
+node test/persist.test.js      # aging clock + save/load round-trip
+node test/gpu.browser.test.js  # REAL GPU engine in headless Chromium
+node test/cosmos.browser.test.js # the persistent universe fly-through in
+                               # Chromium: Universe->Galaxy->System->Planet
 ```
 
 Both run in CI on every push; deployment to GitHub Pages is automatic.

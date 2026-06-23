@@ -149,7 +149,39 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove('show'), 1800);
 }
 
+function currentBudget() {
+  return { gpu: wgpuOK || gpuOK,
+           maxBodies: (wgpuOK || gpuOK) ? MAX_BODIES - 128 : Bodies.CAP };
+}
+
+// After the global Bodies store has been filled (by a scenario init or a
+// cosmos node.populate) and Physics.cfg set, hand it to the active engine.
+function commitToEngine() {
+  if (wgpuOK) {
+    Object.assign(PhysicsWGPU.cfg, Physics.cfg);
+    PhysicsWGPU.upload();
+    RendererWGPU.setSource({
+      posBuf: PhysicsWGPU.posBuf, velBuf: PhysicsWGPU.velBuf,
+      attribBuf: PhysicsWGPU.attribBuf,
+      count: PhysicsWGPU.count, massiveCount: PhysicsWGPU.massiveCount,
+    });
+  } else if (gpuOK) {
+    Object.assign(PhysicsGPU.cfg, Physics.cfg);
+    PhysicsGPU.upload();
+    Renderer3D.setSource({
+      mode: 'texture',
+      posTex: () => PhysicsGPU.posTex,
+      count: PhysicsGPU.count, massiveCount: PhysicsGPU.massiveCount,
+      staticAttribs: PhysicsGPU.staticAttribs,
+    });
+  } else if (Renderer3D.setSource) {
+    Renderer3D.setSource({ mode: 'arrays' });
+  }
+}
+
 function loadScenario(i, seed) {
+  universeMode = false;
+  $('breadcrumb').textContent = '';
   scenarioIdx = (i + Scenarios.list.length) % Scenarios.list.length;
   const sc = Scenarios.list[scenarioIdx];
   followSlot = -1;
@@ -159,32 +191,8 @@ function loadScenario(i, seed) {
   Physics.cfg.timeScale = engine.cfg.timeScale; // keep user's speed setting
   Physics.cfg.theta2 = Physics.cfg.theta2Base;
   engine.clearPull();
-  const ret = sc.init({ gpu: wgpuOK || gpuOK,
-                        maxBodies: (wgpuOK || gpuOK) ? MAX_BODIES - 128 : Bodies.CAP }, seed);
-  if (wgpuOK) {
-    Object.assign(PhysicsWGPU.cfg, Physics.cfg);
-    PhysicsWGPU.upload();
-    RendererWGPU.setSource({
-      posBuf: PhysicsWGPU.posBuf,
-      velBuf: PhysicsWGPU.velBuf,
-      attribBuf: PhysicsWGPU.attribBuf,
-      count: PhysicsWGPU.count,
-      massiveCount: PhysicsWGPU.massiveCount,
-    });
-  } else if (gpuOK) {
-    // Scenarios write Physics.cfg; mirror it into the GPU engine.
-    Object.assign(PhysicsGPU.cfg, Physics.cfg);
-    PhysicsGPU.upload();
-    Renderer3D.setSource({
-      mode: 'texture',
-      posTex: () => PhysicsGPU.posTex,   // ping-pong: identity changes per frame
-      count: PhysicsGPU.count,
-      massiveCount: PhysicsGPU.massiveCount,
-      staticAttribs: PhysicsGPU.staticAttribs,
-    });
-  } else if (Renderer3D.setSource) {
-    Renderer3D.setSource({ mode: 'arrays' });
-  }
+  const ret = sc.init(currentBudget(), seed);
+  commitToEngine();
   if (globalThis.Evolution) Evolution.reset(engine.evolutionView(), 42 + scenarioIdx);
   lastSimT = 0;
   lightPos = ret.lightPos || { x: 0, y: 0, z: 0 };
@@ -193,7 +201,70 @@ function loadScenario(i, seed) {
   toast(sc.label);
   updateHash();
   document.querySelectorAll('#dots span').forEach((d, k) =>
-    d.classList.toggle('on', k === scenarioIdx));
+    d.classList.toggle('on', k === scenarioIdx + 1));   // +1: dot 0 is UNIVERSE
+}
+
+/* ============================================================
+   THE PERSISTENT UNIVERSE — one seed, navigated continuously,
+   aged by the clock (and by real time elapsed between visits).
+   ============================================================ */
+let universeMode = false;
+
+const KIND_LABEL = { universe: 'Universe', galaxy: 'Galaxy', system: 'System', planet: 'Planet' };
+
+function nodeLabel(node) {
+  if (node.id === 'u') return 'Universe';
+  const tail = node.id.split('/').pop();              // e.g. "g9","s0","p2"
+  const n = tail.replace(/^[a-z]/, '');
+  return (KIND_LABEL[node.kind] || node.kind) + ' ' + n;
+}
+
+function breadcrumb(node) {
+  const parts = [];
+  for (let n = node; n; n = n.parent) parts.unshift(nodeLabel(n));
+  return parts.join('  ›  ');
+}
+
+// Populate one cosmos node into the live engine. `reframe` recentres the
+// camera on the node at its interior scale (used on enter + descent/ascent).
+function loadCosmosNode(node, reframe) {
+  followSlot = -1;
+  $('focus').textContent = '';
+  Bodies.clear();
+  Physics.cfg.t = 0;
+  Physics.cfg.theta2 = Physics.cfg.theta2Base;
+  engine.clearPull();
+  const ret = node.populate(currentBudget(), Bodies);
+  if (ret && ret.cfg) Object.assign(Physics.cfg, ret.cfg);
+  Physics.cfg.timeScale = engine.cfg.timeScale;
+  commitToEngine();
+  if (globalThis.Evolution) Evolution.reset(engine.evolutionView(), Cosmos.hashStringToU32(node.id));
+  lastSimT = 0;
+  lightPos = (ret && ret.light) || { x: 0, y: 0, z: 0 };
+  if (reframe) {
+    Camera3D.setGoal({ targetX: 0, targetY: 0, targetZ: 0,
+                       dist: (node.viewRadius || node.radius) * 1.6,
+                       yaw: -0.7, pitch: 0.42 });
+  }
+  $('breadcrumb').textContent = breadcrumb(node);
+}
+
+function enterUniverse(record) {
+  universeMode = true;
+  const seed = record ? record.seed : ((Math.random() * 2 ** 31) | 0) >>> 0;
+  Cosmos.create(seed);
+  let agedMsg = '';
+  if (record) {
+    const aged = Persist.ageDelta(record.lastVisitMs, Date.now());
+    const target = (record.clockMyr || 0) + aged;
+    Cosmos.ageTo(target);
+    if (aged > 1) agedMsg = ' · aged ' + Math.round(aged) + ' Myr while away';
+  }
+  Navigator.init(Cosmos, Camera3D);
+  Navigator.focusNode(Cosmos.root);
+  loadCosmosNode(Cosmos.root, true);
+  document.querySelectorAll('#dots span').forEach((d, k) => d.classList.toggle('on', k === 0));
+  toast('UNIVERSE' + agedMsg);
 }
 
 // ------------------------------------------------------------ focal-plane ray
@@ -340,7 +411,13 @@ window.addEventListener('keydown', (e) => {
     case ' ': e.preventDefault(); engine.cfg.paused = !engine.cfg.paused;
       toast(engine.cfg.paused ? 'PAUSED' : 'RESUMED'); break;
     case 't': trails = !trails; toast(trails ? 'TRAILS ON' : 'TRAILS OFF'); break;
-    case 'r': loadScenario(scenarioIdx); break;
+    case 'u':
+      enterUniverse(null);   // jump into a fresh persistent universe
+      break;
+    case 'r':
+      if (universeMode) { Navigator.focusNode(Cosmos.root); loadCosmosNode(Cosmos.root, true); }
+      else loadScenario(scenarioIdx);
+      break;
     case '[': engine.cfg.timeScale = Math.max(0, +(engine.cfg.timeScale - 0.1).toFixed(1));
       toast('TIME ' + engine.cfg.timeScale.toFixed(1) + 'x'); break;
     case ']': engine.cfg.timeScale = Math.min(3, +(engine.cfg.timeScale + 0.1).toFixed(1));
@@ -387,8 +464,14 @@ function wake() {
 }
 wake();
 
-// ------------------------------------------------------------ scenario dots
+// ------------------------------------------------------------ dots
+// Dot 0 = the persistent UNIVERSE; the rest are the sandbox scenarios.
 const dots = $('dots');
+const uDot = document.createElement('span');
+uDot.title = 'THE UNIVERSE';
+uDot.style.background = 'rgba(140,200,255,0.5)';
+uDot.addEventListener('click', () => enterUniverse(null));
+dots.appendChild(uDot);
 Scenarios.list.forEach((sc, i) => {
   const d = document.createElement('span');
   d.title = sc.label;
@@ -430,6 +513,22 @@ function frame(now) {
   engine.frame();
   engine.adaptQuality(fpsSmooth);
 
+  // Persistent-universe navigation: LOD active-node selection + floating
+  // origin. On a level change, repopulate the live engine with the new
+  // node and reframe. The cosmos clock advances as you watch (and other
+  // nodes age analytically for when you visit them).
+  if (universeMode && globalThis.Navigator && Navigator.active) {
+    const nav = Navigator.update(dtMs);
+    if (nav.changed) {
+      loadCosmosNode(Navigator.active, true);
+      if (globalThis.Sound) Sound.thud();
+    }
+    if (!engine.cfg.paused) {
+      Cosmos.ageTo(Cosmos.clockMyr +
+        engine.cfg.dt * engine.cfg.timeScale * engine.cfg.myrPerT);
+    }
+  }
+
   // Stellar evolution: every 10 frames, advance by accumulated sim-Myr.
   if (globalThis.Evolution && frameNo % 10 === 0 && !engine.cfg.paused) {
     const t = engine.cfg.t;
@@ -448,8 +547,9 @@ function frame(now) {
     }
   }
 
-  // Click-to-focus: glue the camera target to the tracked body.
-  if (followSlot >= 0) {
+  // Click-to-focus: glue the camera target to the tracked body. (Disabled
+  // in universe mode — body indices churn as nodes stream in/out.)
+  if (followSlot >= 0 && !universeMode) {
     if (followSlot < Bodies.n && Bodies.mass[followSlot] > 0 &&
         Bodies.type[followSlot] !== 255) {
       Camera3D.setGoal({
@@ -475,21 +575,55 @@ function frame(now) {
 
 setInterval(() => {
   if (globalThis.Sound) Sound.setScale(Camera3D.dist);
-  if (followSlot >= 0) focusLabel(followSlot);
-  $('stat').textContent =
-    engine.bodyCount().toLocaleString() + ' bodies · ' +
-    engine.simTimeMyr().toFixed(1) + ' Myr · ' +
-    Math.round(fpsSmooth) + ' fps · ' + modeTag;
+  if (universeMode) {
+    const dt = Navigator.descendTarget ? Navigator.descendTarget() : null;
+    $('focus').textContent = dt ? '↡ ' + nodeLabel(dt) : '';
+    $('stat').textContent =
+      'age ' + Math.round(Cosmos.clockMyr).toLocaleString() + ' Myr · ' +
+      engine.bodyCount().toLocaleString() + ' bodies · ' +
+      Math.round(fpsSmooth) + ' fps · ' + modeTag;
+  } else {
+    if (followSlot >= 0) focusLabel(followSlot);
+    $('stat').textContent =
+      engine.bodyCount().toLocaleString() + ' bodies · ' +
+      engine.simTimeMyr().toFixed(1) + ' Myr · ' +
+      Math.round(fpsSmooth) + ' fps · ' + modeTag;
+  }
 }, 400);
+
+// Autosave the universe (seed + clock) so it ages while you are away.
+function saveUniverse() {
+  if (universeMode && globalThis.Cosmos && Cosmos.root) {
+    Persist.save({ seed: Cosmos.seed, clockMyr: Cosmos.clockMyr, edits: [] });
+  }
+}
+setInterval(saveUniverse, 10000);
+window.addEventListener('pagehide', saveUniverse);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') saveUniverse();
+});
 
 if (boot.dm !== undefined) DarkMatter.on = boot.dm !== '0';
 if (boot.ts !== undefined) engine.cfg.timeScale = Math.max(0, Math.min(3, +boot.ts || 1));
-const bootIdx = Math.max(0, Scenarios.list.findIndex(sc => sc.key === boot.s));
 try {
-  loadScenario(bootIdx, boot.seed !== undefined ? (+boot.seed >>> 0) : undefined);
+  if (boot.s) {
+    // Explicit sandbox scenario via URL hash (#s=galaxy&seed=…).
+    const bootIdx = Math.max(0, Scenarios.list.findIndex(sc => sc.key === boot.s));
+    loadScenario(bootIdx, boot.seed !== undefined ? (+boot.seed >>> 0) : undefined);
+  } else if (globalThis.Cosmos && globalThis.Navigator && globalThis.Persist) {
+    // Default: the persistent universe — load the saved seed+clock (aging
+    // it by time elapsed away) or mint a fresh one.
+    let rec = null;
+    try { rec = await Persist.load(); } catch { rec = null; }
+    enterUniverse(rec);
+  } else {
+    loadScenario(0);   // cosmos modules absent (shouldn't happen) — sandbox
+  }
 } catch (e) {
   if (probation) { bailToWebGL(e); return; }
-  throw e;
+  // Universe path failed for a non-WebGPU reason — fall back to sandbox.
+  console.warn('universe boot failed, sandbox fallback:', e);
+  try { loadScenario(0); } catch (e2) { throw e2; }
 }
 requestAnimationFrame(frame);
 })();

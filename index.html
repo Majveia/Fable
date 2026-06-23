@@ -41,6 +41,12 @@
     font-size: 10px; letter-spacing: 1px; color: rgba(184,194,224,0.75);
   }
 
+  #breadcrumb {
+    position: fixed; top: 22px; left: 50%; transform: translateX(-50%);
+    user-select: none; font-size: 10px; letter-spacing: 2px;
+    color: rgba(184,194,224,0.7); white-space: nowrap;
+  }
+
   #hintkey {
     position: fixed; top: 24px; right: 26px; user-select: none;
     font-size: 10px; letter-spacing: 1px; color: rgba(184,194,224,0.4);
@@ -93,6 +99,7 @@
 
 <div id="wordmark" class="ui"><b>FABLE</b>&nbsp;UNIVERSE</div>
 <div id="hintkey" class="ui">h — help</div>
+<div id="breadcrumb" class="ui"></div>
 <div id="dots" class="ui"></div>
 <div id="stat" class="ui"></div>
 <div id="focus" class="ui"></div>
@@ -104,8 +111,9 @@
     <table>
       <tr><td>drag</td><td>orbit</td></tr>
       <tr><td>shift-drag / right-drag</td><td>pan</td></tr>
-      <tr><td>scroll / pinch</td><td>zoom</td></tr>
-      <tr><td>1 – 8 &nbsp;or&nbsp; ← →</td><td>scenarios</td></tr>
+      <tr><td>scroll / pinch</td><td>zoom — in the universe, zoom in to enter a galaxy / star / planet, out to leave</td></tr>
+      <tr><td>u</td><td>the persistent universe (saved &amp; aging between visits)</td></tr>
+      <tr><td>1 – 8 &nbsp;or&nbsp; ← →</td><td>sandbox scenarios</td></tr>
       <tr><td>space</td><td>pause</td></tr>
       <tr><td>[ &nbsp;]</td><td>time speed</td></tr>
       <tr><td>t</td><td>trails</td></tr>
@@ -138,6 +146,9 @@
 <script src="js/webgpu/render.js?v=6"></script>
 <script src="js/sound.js?v=6"></script>
 <script src="js/scenarios.js?v=6"></script>
+<script src="js/cosmos/cosmos.js?v=6"></script>
+<script src="js/cosmos/navigator.js?v=6"></script>
+<script src="js/cosmos/persist.js?v=6"></script>
 <script src="js/main.js?v=6"></script>
 </body>
 </html>
