@@ -251,7 +251,10 @@ function loadCosmosNode(node, reframe) {
 }
 
 // ---- DRIFTER game state ----
-let camMode = 'chase';            // chase | cockpit | orbit
+let camMode = 'chase';            // FLY camera: chase | cockpit | orbit
+let walkMode = false;             // on foot inside the ship
+let walkView = 'fp';              // walk camera: fp | tp
+let overlay = null;               // ship wireframe overlay (node-local), per frame
 let scanHeld = false;
 let pois = [];
 let lmList = [];
@@ -298,6 +301,19 @@ function buildShipInput() {
 
 function dist3(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]); }
 
+// On-foot input: WASD walk, drag look, shift run (shares heldKeys/steer).
+function buildAvatarInput() {
+  const i = { fwd: 0, strafe: 0, turn: 0, lookPitch: 0, run: false };
+  if (heldKeys['w'] || heldKeys['arrowup']) i.fwd += 1;
+  if (heldKeys['s'] || heldKeys['arrowdown']) i.fwd -= 1;
+  if (heldKeys['a'] || heldKeys['arrowleft']) i.strafe -= 1;
+  if (heldKeys['d'] || heldKeys['arrowright']) i.strafe += 1;
+  if (heldKeys['shift']) i.run = true;
+  i.turn += steer.dx; i.lookPitch += steer.dy;
+  steer.dx *= 0.55; steer.dy *= 0.55;
+  return i;
+}
+
 function saveGame() {
   if (!universeMode || !globalThis.Cosmos || !Cosmos.root) return;
   const game = globalThis.Drifter ? Drifter.serialize() : null;
@@ -337,10 +353,108 @@ function drifterHUD(input) {
   HUD.update({
     speed: sh.speed, throttle: input.thrust > 0 ? input.thrust : Math.min(1, sh.speed / ((Ship && Ship._topSpeed) || 1)),
     boost: !!input.boost, breadcrumb: breadcrumb(Navigator.active),
-    coords: sh.pos, heading: [sh.yaw, sh.pitch], mode: camMode, fps: fpsSmooth,
+    coords: sh.pos, heading: [sh.yaw, sh.pitch], fps: fpsSmooth,
+    mode: walkMode ? ('walk ' + walkView) : ('fly ' + (camMode === 'cockpit' ? 'fp' : camMode === 'orbit' ? 'orbit' : 'tp')),
     scanProgress: globalThis.Drifter ? Drifter.scanProgress : 0,
     target, bounty: globalThis.Drifter ? Drifter.activeBounty : null,
   });
+}
+
+/* ============================================================
+   WANDERER — be a person, not just a ship. The ship has a model
+   (wireframe + interior) in SHIP SPACE; the avatar walks it. We
+   transform ship space -> the active node's LOCAL frame using the
+   ship's pose, draw the ship as a render overlay, and drive the
+   camera from either the ship (flying) or the avatar (on foot),
+   in first or third person.
+   ============================================================ */
+function cross(a, b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function norm(a) { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0]/l, a[1]/l, a[2]/l]; }
+
+// Ship-space basis in node-local coords from the ship's pose (+Z fwd, +Y up,
+// +X right), with roll applied about the forward axis.
+function shipBasis() {
+  const F = globalThis.Ship ? norm(Ship.facing()) : [0, 0, 1];
+  let R = cross([0, 1, 0], F);
+  if (Math.hypot(R[0], R[1], R[2]) < 1e-6) R = [1, 0, 0];
+  R = norm(R);
+  let U = cross(F, R);
+  const roll = (globalThis.Ship && Ship.state.roll) || 0;
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  const R2 = [R[0]*cr + U[0]*sr, R[1]*cr + U[1]*sr, R[2]*cr + U[2]*sr];
+  const U2 = [U[0]*cr - R[0]*sr, U[1]*cr - R[1]*sr, U[2]*cr - R[2]*sr];
+  return { F, R: R2, U: U2 };
+}
+function shipWorldLen() {
+  const vr = (Navigator.active && (Navigator.active.viewRadius || Navigator.active.radius)) || 1000;
+  return Math.max(8, Math.min(vr * 0.03, 300));
+}
+function shipToLocal(s, b, scale, o) {
+  return [
+    o[0] + (b.R[0]*s[0] + b.U[0]*s[1] + b.F[0]*s[2]) * scale,
+    o[1] + (b.R[1]*s[0] + b.U[1]*s[1] + b.F[1]*s[2]) * scale,
+    o[2] + (b.R[2]*s[0] + b.U[2]*s[1] + b.F[2]*s[2]) * scale,
+  ];
+}
+function shipDirToLocal(d, b) {
+  return [b.R[0]*d[0] + b.U[0]*d[1] + b.F[0]*d[2],
+          b.R[1]*d[0] + b.U[1]*d[1] + b.F[1]*d[2],
+          b.R[2]*d[0] + b.U[2]*d[1] + b.F[2]*d[2]];
+}
+
+// Build the ship wireframe overlay (lines + interior node sprites) in the
+// active node's local frame from ShipModel (ship space).
+function buildOverlay() {
+  if (!globalThis.ShipModel || !globalThis.Ship) { overlay = null; return null; }
+  const b = shipBasis();
+  const scale = shipWorldLen() / (ShipModel.scale || 16);
+  const o = Ship.state.pos;
+  const src = ShipModel.lines || new Float32Array(0);
+  const out = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i += 3) {
+    const p = shipToLocal([src[i], src[i + 1], src[i + 2]], b, scale, o);
+    out[i] = p[0]; out[i + 1] = p[1]; out[i + 2] = p[2];
+  }
+  const pts = (ShipModel.nodes || []).map((n) => {
+    const p = shipToLocal(n.pos, b, scale, o);
+    return { x: p[0], y: p[1], z: p[2], colorIdx: n.colorIdx, size: scale * 0.5 };
+  });
+  overlay = { lines: out, lineColor: ShipModel.lineColor || [0.32, 0.9, 1.0], points: pts, _b: b, _scale: scale };
+  return overlay;
+}
+
+// Place the camera so its eye sits at E (node-local) looking along unit L.
+// eye = target + dist*(cp*sy, sp, cp*cy); look = -that. So target = E + L*D.
+function aimCamera(E, L, D) {
+  const pitch = Math.asin(Math.max(-1, Math.min(1, -L[1])));
+  const yaw = Math.atan2(-L[0], -L[2]);
+  Camera3D.setGoal({ targetX: E[0] + L[0]*D, targetY: E[1] + L[1]*D, targetZ: E[2] + L[2]*D,
+                     dist: D, yaw, pitch });
+  Camera3D.snap();
+}
+
+// On-foot camera from the avatar's mount, transformed ship -> local.
+function walkCamera() {
+  if (!globalThis.Avatar || !overlay) return;
+  const m = Avatar.cameraMount(walkView);   // ship space {pos,forward,up}
+  const E = shipToLocal(m.pos, overlay._b, overlay._scale, Ship.state.pos);
+  const L = norm(shipDirToLocal(m.forward, overlay._b));
+  aimCamera(E, L, Math.max(0.5, shipWorldLen() * 0.06));
+}
+
+function toggleWalk() {
+  if (!globalThis.Avatar || !globalThis.ShipModel) { toast('NO INTERIOR'); return; }
+  walkMode = !walkMode;
+  if (walkMode) {
+    if (globalThis.Ship) { Ship.state.vel = [0, 0, 0]; }   // ship holds station
+    Avatar.reset({ seat: ShipModel.seat });
+    walkView = 'fp';
+    toast('ON FOOT · ' + walkView.toUpperCase());
+    if (globalThis.HUD) HUD.toast('LEFT THE PILOT SEAT', '#37e6ff');
+  } else {
+    toast('PILOT SEAT');
+    if (globalThis.HUD) HUD.toast('BACK AT THE HELM', '#37e6ff');
+  }
 }
 
 function enterUniverse(record) {
@@ -537,10 +651,25 @@ window.addEventListener('keydown', (e) => {
     case 'u':
       enterUniverse(null);   // jump into a fresh drifter universe
       break;
+    case 'x': case 'X':
+      if (universeMode) toggleWalk();      // enter / leave the ship on foot
+      break;
+    case 'v': case 'V':
+      if (universeMode) {
+        if (walkMode) { walkView = walkView === 'fp' ? 'tp' : 'fp'; toast('VIEW · ' + walkView.toUpperCase()); }
+        else { camMode = camMode === 'cockpit' ? 'chase' : 'cockpit';
+          toast('VIEW · ' + (camMode === 'cockpit' ? 'FIRST PERSON' : 'THIRD PERSON')); }
+      }
+      break;
     case 'c':
       if (universeMode) {
-        camMode = camMode === 'chase' ? 'cockpit' : camMode === 'cockpit' ? 'orbit' : 'chase';
-        toast('CAM · ' + camMode.toUpperCase());
+        // 4-way cycle: fly-TP -> fly-FP -> walk-FP -> walk-TP -> fly-TP
+        if (!walkMode && camMode === 'chase') camMode = 'cockpit';
+        else if (!walkMode && camMode === 'cockpit') { if (globalThis.Avatar && globalThis.ShipModel) { toggleWalk(); walkView = 'fp'; } else camMode = 'orbit'; }
+        else if (walkMode && walkView === 'fp') walkView = 'tp';
+        else if (walkMode && walkView === 'tp') { toggleWalk(); camMode = 'chase'; }
+        else camMode = 'chase';
+        toast('CAM · ' + (walkMode ? 'WALK ' + walkView.toUpperCase() : 'FLY ' + camMode.toUpperCase()));
       }
       break;
     case 'f':
@@ -689,11 +818,22 @@ function frame(now) {
   if (universeMode && globalThis.Navigator && Navigator.active) {
     dtSecLast = dtMs / 1000;
     const input = buildShipInput();
-    if (globalThis.Ship && camMode !== 'orbit' && !engine.cfg.paused) {
-      Ship.update(dtSecLast, input);
-      const goal = Ship.cameraGoal(camMode);
-      if (goal) Camera3D.setGoal(goal);
-      if (globalThis.Score) Score.setThrust(input.thrust > 0 ? (input.boost ? 1 : 0.6) : 0);
+    if (walkMode && globalThis.Avatar) {
+      // ON FOOT: the ship holds station; you walk its interior; the camera
+      // rides the avatar (first or third person).
+      Avatar.update(dtSecLast, buildAvatarInput(), globalThis.ShipModel);
+      buildOverlay();
+      walkCamera();
+      if (globalThis.Score) Score.setThrust(0);
+    } else {
+      // FLYING: pilot the ship; camera = cockpit (FP) or chase (TP).
+      if (globalThis.Ship && camMode !== 'orbit' && !engine.cfg.paused) {
+        Ship.update(dtSecLast, input);
+        const goal = Ship.cameraGoal(camMode);
+        if (goal) Camera3D.setGoal(goal);
+        if (globalThis.Score) Score.setThrust(input.thrust > 0 ? (input.boost ? 1 : 0.6) : 0);
+      }
+      buildOverlay();
     }
     const nav = Navigator.update(dtMs);
     if (nav.changed) {
@@ -757,6 +897,7 @@ function frame(now) {
     lightPos, trails, timeMs: now,
     blackHoles: engine.blackHoleList(),
     attribsVersion: engine.attribsVersion || 0,
+    overlay: (universeMode && overlay) ? overlay : null,   // ship wireframe
   });
   requestAnimationFrame(frame);
 }
