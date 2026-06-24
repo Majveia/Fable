@@ -33,8 +33,13 @@
   void main() {
     vec3 c = texture(u_scene, v_uv).rgb;
     float l = dot(c, vec3(0.299, 0.587, 0.114));
-    // soft knee around 0.5: cores bloom, faint stars stay crisp
-    o = vec4(c * smoothstep(0.35, 0.9, l), 1.0);
+    // v8: a slightly lower, wider knee so colorful nebulae and bright
+    // cores bloom for a Cosmos glow, while faint background stars stay
+    // crisp (knee floor still above the dim starfield). Saturation is
+    // gently boosted so the bloom carries hue, not white.
+    float knee = smoothstep(0.32, 0.9, l);
+    vec3 sat = mix(vec3(l), c, 1.25);            // push chroma into bloom
+    o = vec4(max(sat, vec3(0.0)) * knee, 1.0);
   }`;
 
   const BLUR_FS = `#version 300 es
@@ -85,9 +90,15 @@
       shadow *= smoothstep(u_bh[i].w * 0.55, u_bh[i].w, r);
     }
     vec2 uv = clamp(sample_px / u_res, vec2(0.001), vec2(0.999));
-    vec3 c = texture(u_scene, uv).rgb + texture(u_bloom, uv).rgb * 1.35;
+    // v8 WANDERER: lift bloom + a notch of exposure for a luminous,
+    // colorful Cosmos glow. ACES below keeps highlights from blowing to
+    // flat white, so it reads bright & vivid but stars stay readable.
+    vec3 scene = texture(u_scene, uv).rgb;
+    vec3 bloom = texture(u_bloom, uv).rgb;
+    vec3 c = scene + bloom * 1.4;        // richer colored bloom
     c += ring * vec3(0.75, 0.85, 1.0) * (c + vec3(0.06));
     c *= shadow;
+    c *= 1.05;                           // gentle exposure lift
     o = vec4(aces(c), 1.0);
   }`;
 

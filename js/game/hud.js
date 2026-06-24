@@ -148,7 +148,11 @@
         (s.coords ? s.coords.map((c) => Math.round(c)).join('  ') + '<br>' : '') +
         'HDG ' + (s.heading ? s.heading.map((h) => Math.round(h * 57.3)).join(' / ') : '0 / 0') +
         '  ·  ' + (s.mode || 'chase').toUpperCase() +
-        (s.fps ? '  ·  ' + Math.round(s.fps) + ' fps' : '');
+        (s.fps ? '  ·  ' + Math.round(s.fps) + ' fps' : '') +
+        ((s.age != null || s.bodies != null || s.engineTag) ? '<br>' +
+          (s.age != null ? 'age ' + Math.round(s.age).toLocaleString() + ' Myr · ' : '') +
+          (s.bodies != null ? s.bodies.toLocaleString() + ' bodies · ' : '') +
+          (s.engineTag || '') : '');
 
       // scanner ring progress
       if (s.scanProgress > 0) {

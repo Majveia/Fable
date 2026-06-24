@@ -34,6 +34,10 @@ jobs:
         run: node test/landmarks.test.js
       - name: DRIFTER game-state tests
         run: node test/drifter.test.js
+      - name: WANDERER ship-model tests
+        run: node test/shipmodel.test.js
+      - name: WANDERER avatar tests
+        run: node test/avatar.test.js
       - name: Scenario smoke test
         run: node test/smoke.js
 
@@ -55,6 +59,8 @@ jobs:
         run: node test/cosmos.browser.test.js
       - name: DRIFTER playable loop in headless Chromium
         run: node test/drifter.browser.test.js
+      - name: WANDERER walk + fly (FP/TP) in headless Chromium
+        run: node test/wanderer.browser.test.js
 
   webgpu-smoke:
     runs-on: ubuntu-latest

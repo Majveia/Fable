@@ -27,42 +27,38 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.goto(url);
   await page.waitForTimeout(5000);   // boot + first populate
 
-  const bc0 = await page.evaluate(() => document.getElementById('breadcrumb').textContent);
+  const bc0 = await page.evaluate(() => document.getElementById('hud-nav').textContent);
   check(/Universe/.test(bc0), 'boots into the persistent universe', bc0);
-  const stat0 = await page.evaluate(() => document.getElementById('stat').textContent);
-  check(/age .*Myr/.test(stat0), 'HUD shows the universe age', stat0);
+  const stat0 = await page.evaluate(() => document.getElementById('hud-nav').textContent);
+  check(/Myr/.test(stat0), 'HUD shows the universe age', stat0);
   const bodies0 = await page.evaluate(() => window.Bodies ? window.Bodies.n : 0);
   check(bodies0 > 0, 'universe root populated', bodies0 + ' bodies');
 
   // Guided descent: each step aim the real camera at the active node's
   // first child and shrink dist; the app's rAF loop runs Navigator.update
   // and descends. Poll the breadcrumb depth.
+  // Descend the LOD hierarchy by focusing the first non-landmark child at
+  // each level (DRIFTER drives the camera from the ship, so we navigate via
+  // the Navigator the way the in-game fast-travel / jump does). The app's
+  // rAF loop repopulates on the active-node change.
   const depth = (s) => (s.match(/›/g) || []).length;
   let maxDepth = depth(bc0);
   const reached = [bc0];
   for (let level = 0; level < 3; level++) {
-    // drive for up to ~3.5s per level, re-aiming each tick
-    let landed = false;
-    for (let t = 0; t < 14 && !landed; t++) {
-      await page.evaluate(() => {
-        const a = window.Navigator && window.Navigator.active;
-        if (!a || typeof a.children !== 'function') return;
-        const kids = a.children();
-        if (!kids || !kids.length) return;
-        const c = kids[0];
-        const o = window.Navigator.origin;
-        window.Camera3D.setGoal({
-          targetX: c.ac[0] - o[0], targetY: c.ac[1] - o[1], targetZ: c.ac[2] - o[2],
-          dist: Math.max(c.radius * 1.15, 5),
-        });
-      });
-      await sleep(260);
-      const bc = await page.evaluate(() => document.getElementById('breadcrumb').textContent);
-      if (depth(bc) > maxDepth) { maxDepth = depth(bc); reached.push(bc); landed = true; }
-    }
+    const ok = await page.evaluate(() => {
+      const a = window.Navigator && window.Navigator.active;
+      if (!a || typeof a.children !== 'function') return false;
+      const kids = a.children().filter((c) => !c.landmark);
+      if (!kids.length) return false;
+      window.Navigator.focusNode(kids[0]);
+      return true;
+    });
+    if (!ok) break;
+    await sleep(900);   // let the loop repopulate + HUD update
+    const bc = await page.evaluate(() => document.getElementById('hud-nav').textContent);
+    if (depth(bc) > maxDepth) { maxDepth = depth(bc); reached.push(bc); }
     const bodiesNow = await page.evaluate(() => window.Bodies ? window.Bodies.n : 0);
     check(bodiesNow > 0, `level ${level + 1}: populated after descent`, bodiesNow + ' bodies');
-    if (!landed) break;
   }
   check(maxDepth >= 3, 'flew Universe -> Galaxy -> System -> Planet (4 levels)',
         reached[reached.length - 1]);
@@ -78,7 +74,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const seedAfter = await page.evaluate(() => window.Cosmos ? window.Cosmos.seed : -1);
   check(seedAfter === seedBefore, 'same universe restored after reload (seed persists)',
         seedBefore + ' -> ' + seedAfter);
-  const bcReload = await page.evaluate(() => document.getElementById('breadcrumb').textContent);
+  const bcReload = await page.evaluate(() => document.getElementById('hud-nav').textContent);
   check(/Universe/.test(bcReload), 'reload returns to the universe', bcReload);
 
   check(errors.length === 0, 'no page errors across the whole flight',

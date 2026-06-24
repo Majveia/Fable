@@ -38,6 +38,40 @@ function starColor() {
   return 0;
 }
 
+/* ---------------------------------------------------------------
+   VIVID EMISSION-NEBULA HUES (the gas palette).
+
+   Gas billboards draw their colorIdx from this small, deliberately
+   vivid set so overlapping clouds read as glowing, colourful nebulae
+   (a Cosmos/Planet-Earth look) rather than one flat magenta haze.
+   We brighten by VARYING the hue, not by inflating particle counts.
+
+   PALETTE CONTRACT (coordinated with the renderer agent):
+     9  nebula magenta   (existing) — backbone
+     10 nebula teal/OIII (existing) — backbone
+     12 H-alpha red                 — vivid accent
+     13 gold / amber                — vivid accent
+     14 violet / royal blue         — vivid accent
+   Index 11 is dust grey-blue and is deliberately NOT a gas hue.
+   The renderer must define palette entries through index 14 for these
+   to colour correctly; below 12 it degrades to the classic two-hue look.
+
+   Weighting keeps magenta/teal common (the recognisable nebula base)
+   and sprinkles the three new hues as ~36% vivid accents, so a cloud
+   shimmers across reds, golds and violets without becoming confetti.
+   --------------------------------------------------------------- */
+const GAS_HUES = [9, 10, 12, 13, 14];
+const GAS_WEIGHTS = [0.32, 0.32, 0.14, 0.10, 0.12];
+// Draw a gas colorIdx from the vivid emission set (uses the module RNG).
+function gasColor() {
+  let r = _rng();
+  for (let i = 0; i < GAS_HUES.length; i++) {
+    r -= GAS_WEIGHTS[i];
+    if (r < 0) return GAS_HUES[i];
+  }
+  return GAS_HUES[GAS_HUES.length - 1];
+}
+
 // Orthonormal basis (u, v) perpendicular to a unit normal n.
 function basisFor(nx, ny, nz) {
   let ux, uy, uz;
@@ -114,7 +148,7 @@ function makeGalaxy(opts) {
       const tvy = (-uy * st + vy_ * ct) * spinDir * v;
       const tvz = (-uz * st + vz_ * ct) * spinDir * v;
       const c = color === -1 ? starColor()
-              : color === -2 ? (_rng() < 0.5 ? 9 : 10)
+              : color === -2 ? gasColor()
               : color;
       bodies.add(x, y, zz, cvx + tvx, cvy + tvy, cvz + tvz,
                  mass, rand(radLo, radHi), c, type, null);
@@ -177,7 +211,7 @@ def('galaxy', 'SPIRAL GALAXY', (budget = DEF_BUDGET) => {
   const g = budget.gpu;
   const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;   // WebGPU tier
   makeGalaxy({ cx: 0, cy: 0, cz: 0, cvx: 0, cvy: 0, cvz: 0,
-    stars: g ? 12000 : 4600, dust: g ? 128000 * X : 9000, gas: g ? 5000 * Math.min(X, 2) : 600,
+    stars: g ? 12000 : 4600, dust: g ? 128000 * X : 9000, gas: g ? 6000 * Math.min(X, 2) : 900,
     radius: 900, bhMass: 40000, tiltRad: 0.0, spinDir: 1 });
   return { camDist: 1500, lightPos: { x: 0, y: 0, z: 0 } };
 });
@@ -330,13 +364,16 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
     const c = cores[(_rng() * CLUMPS) | 0];
     return [c.x + gauss() * c.s * 2.6, c.y + gauss() * c.s * 1.6, c.z + gauss() * c.s * 2.6];
   };
-  for (let i = 0; i < (g ? 9000 * Math.min(X, 2) : 1100); i++) {
+  // Emission gas: the cathedral light of the nursery. A vivid spread of
+  // H-alpha red, OIII teal, gold and violet over the magenta base — a
+  // modest count bump (1100 -> 1500 cpu) traded mostly into colour.
+  for (let i = 0; i < (g ? 11000 * Math.min(X, 2) : 1500); i++) {
     const [x, y, z] = sample();
     const d = Math.hypot(x, y, z) + 1;
     const v = Math.sqrt(totalM / Math.max(d, 200)) * 0.25;
     bodies.add(x, y, z,
       -x / d * v + gauss() * 0.4, -y / d * v + gauss() * 0.4, -z / d * v + gauss() * 0.4,
-      0.001, rand(10, 26), _rng() < 0.55 ? 9 : 10, TYPE_GAS, null);
+      0.001, rand(10, 26), gasColor(), TYPE_GAS, null);
   }
   for (let i = 0; i < (g ? 60000 * X : 9000); i++) {
     const [x, y, z] = sample();
@@ -395,7 +432,7 @@ def('bigbang', 'BIG BANG', (budget = DEF_BUDGET) => {
   };
   put(g ? 12000 : 6500, 2.2, 0.6, 1.6, TYPE_STAR, starColor);
   put(g ? 128000 * X : 11000, 0.001, 0.3, 0.7, TYPE_DUST, () => 11);
-  put(g ? 5000 * Math.min(X, 2) : 700, 0.001, 14, 30, TYPE_GAS, () => (_rng() < 0.5 ? 9 : 10));
+  put(g ? 5000 * Math.min(X, 2) : 700, 0.001, 14, 30, TYPE_GAS, gasColor);
   return { camDist: 900, lightPos: { x: 0, y: 0, z: 0 } };
 });
 
@@ -412,8 +449,10 @@ def('supercluster', 'SUPERCLUSTER', (budget = DEF_BUDGET) => {
   const target = g ? budget.maxBodies * 0.92 : 25000;
   const perGal = Math.floor(target / NGAL);
   const stars = g ? 320 : Math.max(120, Math.floor(perGal * 0.40));
-  const dust = g ? Math.max(0, perGal - Math.floor(stars * 1.18) - 9) : Math.floor(perGal * 0.52);
-  const gas = g ? 8 : 6;
+  const dust = g ? Math.max(0, perGal - Math.floor(stars * 1.18) - 14) : Math.floor(perGal * 0.52);
+  // More gas per web galaxy (6 -> 12 cpu, 8 -> 14 gpu) in the vivid set so
+  // the cosmic web shimmers with colour; trivial vs. the dust/star budget.
+  const gas = g ? 14 : 12;
 
   const fils = [];
   for (let f = 0; f < FIL; f++) {
@@ -465,7 +504,9 @@ globalThis.Scenarios = Scenarios;
 globalThis.Builders = {
   makeGalaxy,                 // ({cx,cy,cz,cvx,cvy,cvz,stars,dust,gas,radius,bhMass,tilt...})
   mulberry32,                 // seedable RNG factory
-  starColor, basisFor, unitNormalFromTilt, gauss, rand,
+  starColor, gasColor,        // palette draws (gasColor: vivid emission set 9,10,12,13,14)
+  GAS_HUES, GAS_WEIGHTS,      // the vivid gas-emission palette + weights (documented)
+  basisFor, unitNormalFromTilt, gauss, rand,
   setRng(fn) { _rng = fn; },  // drive the module RNG (rand/gauss/makeGalaxy use it)
   resetRng() { _rng = Math.random; },
   TYPE_STAR, TYPE_BH, TYPE_PLANET, TYPE_DUST, TYPE_GAS,

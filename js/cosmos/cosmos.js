@@ -317,8 +317,10 @@ function popUniverse(node, budget, out) {
   const target = g ? budget.maxBodies * 0.92 : Math.min(budget.maxBodies * 0.4, 25000);
   const perGal = Math.floor(target / NGAL);
   const stars = g ? 320 : Math.max(120, Math.floor(perGal * 0.40));
-  const dust = g ? Math.max(0, perGal - Math.floor(stars * 1.18) - 9) : Math.floor(perGal * 0.52);
-  const gas = g ? 8 : 6;
+  const dust = g ? Math.max(0, perGal - Math.floor(stars * 1.18) - 14) : Math.floor(perGal * 0.52);
+  // More vivid gas per web galaxy (mirrors the supercluster scenario): the
+  // colour comes from makeGalaxy's gasColor() draw over the emission set.
+  const gas = g ? 14 : 12;
 
   // Phase continuity: rotating the whole web's azimuth by node.phase keeps
   // re-entry continuous (the web "drifts" with the clock).
@@ -377,7 +379,7 @@ function popGalaxy(node, budget, out) {
     cx: 0, cy: 0, cz: 0, cvx: 0, cvy: 0, cvz: 0,
     stars: g ? 12000 : 4600,
     dust: g ? 128000 * X : 9000,
-    gas: g ? 5000 * Math.min(X, 2) : 600,
+    gas: g ? 6000 * Math.min(X, 2) : 900,
     radius: 900, bhMass: 40000,
     tiltRad: 0.35, azimuthRad: node.phase, spinDir: 1,
   });

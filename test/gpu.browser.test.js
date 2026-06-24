@@ -43,7 +43,7 @@ const check = (cond, msg, extra) => {
     page.on('pageerror', (e) => errors.push(e.message));
     await page.goto('file://' + path.join(root, 'index.html'));
     await page.waitForTimeout(5000);
-    const stat = await page.evaluate(() => document.getElementById('stat').textContent);
+    const stat = await page.evaluate(() => document.getElementById('hud-nav').textContent);
     check(/gpu/.test(stat), 'GPU engine active', stat);
     const bodies = parseInt(stat.replace(/[^0-9]/g, ''), 10);
     check(bodies > 100000, 'galaxy runs >100k bodies in GPU mode', stat);

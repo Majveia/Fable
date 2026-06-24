@@ -48,6 +48,13 @@
 
   // PALETTE per contract: 0..6 stellar O→M (as v1), 7 sun-yellow,
   // 8 accretion blue, 9 nebula magenta, 10 nebula teal, 11 dust grey-blue.
+  // v8 WANDERER: indices 12..17 add a WIDER VIVID emission-nebula set
+  // (H-alpha red, OIII teal/green, gold, violet, vivid magenta, royal
+  // blue) so gas reads as luminous colorful clouds. The gas/type-4
+  // sprites may use any of 9,10,12..17 (the cosmos-color agent and the
+  // integrator code against these indices). Array size is derived from
+  // PALETTE.length and threaded into both body shaders, so adding more
+  // entries here is safe as long as colorIdx stays in range.
   const PALETTE = [
     [155, 176, 255], // 0 O  hot blue
     [170, 191, 255], // 1 B
@@ -58,10 +65,17 @@
     [255, 163, 110], // 6 M  red dwarf
     [255, 220,  90], // 7 sun yellow
     [120, 200, 255], // 8 accretion blue
-    [210, 120, 255], // 9 nebula magenta
-    [ 90, 220, 200], // 10 nebula teal
+    [228, 110, 255], // 9 nebula magenta (vivid)
+    [ 70, 235, 205], // 10 nebula teal (vivid)
     [150, 160, 200], // 11 dust grey-blue
+    [255,  70,  96], // 12 H-alpha emission red
+    [ 60, 230, 150], // 13 OIII teal-green
+    [255, 196,  70], // 14 nebula gold
+    [176,  96, 255], // 15 violet
+    [255,  86, 210], // 16 vivid magenta
+    [ 78, 124, 255], // 17 royal blue
   ];
+  const PAL_N = PALETTE.length;
 
   const FLOATS = 6; // x, y, z, rad, colorIdx, type
   const BG_STAR_COUNT = 3000;
@@ -73,10 +87,10 @@
 precision highp float;
 layout(location = 0) in vec3  a_pos;      // world coords
 layout(location = 1) in float a_rad;      // visual radius, world units
-layout(location = 2) in float a_colorIdx; // palette index 0..11
+layout(location = 2) in float a_colorIdx; // palette index 0..${PAL_N - 1}
 layout(location = 3) in float a_type;     // 0 star 1 bh 2 planet 3 dust 4 gas
 uniform mat4  u_viewProj;
-uniform vec3  u_palette[12];
+uniform vec3  u_palette[${PAL_N}];
 uniform float u_sizeScale;     // glow vs. solid-body scale, set per pass
 uniform float u_viewportH;     // CSS pixels
 uniform float u_dpr;
@@ -88,7 +102,9 @@ void main() {
   vec4 clip = u_viewProj * vec4(a_pos, 1.0);
   gl_Position = clip;
   float w = max(clip.w, 1e-4);
-  float s = clamp(a_rad * u_sizeScale * u_viewportH / w, 1.5, 160.0) * u_dpr;
+  // gas gets a larger softer footprint so volumetric clouds bloom wide
+  float gasScale = a_type > 3.5 ? 1.6 : 1.0;
+  float s = clamp(a_rad * u_sizeScale * gasScale * u_viewportH / w, 1.5, 220.0) * u_dpr;
   gl_PointSize = min(s, u_maxPointSize);
   v_color = u_palette[int(a_colorIdx + 0.5)];
   v_type = a_type;
@@ -108,7 +124,7 @@ layout(location = 1) in float a_colorIdx;
 layout(location = 2) in float a_type;
 uniform sampler2D u_posTex;    // xyz = world pos, w = mass (< 0 dead)
 uniform mat4  u_viewProj;
-uniform vec3  u_palette[12];
+uniform vec3  u_palette[${PAL_N}];
 uniform float u_sizeScale;
 uniform float u_viewportH;
 uniform float u_dpr;
@@ -130,7 +146,8 @@ void main() {
   vec4 clip = u_viewProj * vec4(pm.xyz, 1.0);
   gl_Position = clip;
   float w = max(clip.w, 1e-4);
-  float s = clamp(a_rad * u_sizeScale * u_viewportH / w, 1.5, 160.0) * u_dpr;
+  float gasScale = a_type > 3.5 ? 1.6 : 1.0;
+  float s = clamp(a_rad * u_sizeScale * gasScale * u_viewportH / w, 1.5, 220.0) * u_dpr;
   gl_PointSize = min(s, u_maxPointSize);
   v_color = u_palette[int(a_colorIdx + 0.5)];
   v_type = a_type;
@@ -169,10 +186,14 @@ void main() {
     if (t > 1.5 && t < 2.5) discard;   // planets render in the opaque pass
     float a; vec3 col;
     if (t > 3.5) {
-      // gas: very soft pure-hue haze, no white core — reads volumetric
-      // when many huge points overlap.
-      float fall = 1.0 - smoothstep(0.0, 1.0, d);
-      a = 0.07 * fall * fall;
+      // gas: luminous pure-hue volumetric haze, no white core. A wider,
+      // softer Gaussian-ish falloff (gentle out to the rim) so many huge
+      // overlapping points additively build into glowing colorful clouds.
+      // A faint warm inner lift gives nebulae depth without a hard core.
+      float core = exp(-d * d * 2.4);            // soft inner brightening
+      float halo = 1.0 - smoothstep(0.0, 1.0, d); // broad outer falloff
+      a = 0.10 * (0.22 * core + halo * halo);
+      // keep the hue saturated so stacked gas glows colorful, not white
       col = v_color;
     } else if (t > 0.5 && t < 1.5) {
       // black hole halo: bright thin annulus, slightly blue, plus a
@@ -252,6 +273,65 @@ void main() {
   outColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }`;
 
+  /* ---- ship overlay (v8 WANDERER) ----
+     A dedicated tiny pass drawn AFTER the universe + post-processing.
+     Glowing additive GL_LINES (wireframe ship hull) + additive point
+     sprites (interior nodes / markers), projected with the SAME
+     viewProj as the scene so they sit in the active node's local frame,
+     in front of the bodies. No overlay opts -> this pass never runs and
+     behaviour is byte-for-byte unchanged. */
+  const OVL_LINE_VERT_SRC = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 a_pos;     // node-local segment endpoint
+uniform mat4 u_viewProj;
+void main() {
+  gl_Position = u_viewProj * vec4(a_pos, 1.0);
+}`;
+
+  const OVL_LINE_FRAG_SRC = `#version 300 es
+precision highp float;
+uniform vec3  u_color;
+uniform float u_intensity;
+out vec4 outColor;
+void main() {
+  // additive premultiplied glow; bloom in PostFX widens the line.
+  vec3 c = u_color * u_intensity;
+  outColor = vec4(c, 1.0);
+}`;
+
+  const OVL_PT_VERT_SRC = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3  a_pos;      // node-local marker position
+layout(location = 1) in float a_colorIdx; // palette index
+layout(location = 2) in float a_size;     // pixel size hint
+uniform mat4  u_viewProj;
+uniform vec3  u_palette[${PAL_N}];
+uniform float u_dpr;
+uniform float u_maxPointSize;
+out vec3 v_color;
+void main() {
+  vec4 clip = u_viewProj * vec4(a_pos, 1.0);
+  gl_Position = clip;
+  float s = clamp(a_size, 2.0, 64.0) * u_dpr;
+  gl_PointSize = min(s, u_maxPointSize);
+  v_color = u_palette[int(a_colorIdx + 0.5)];
+}`;
+
+  const OVL_PT_FRAG_SRC = `#version 300 es
+precision highp float;
+in vec3 v_color;
+out vec4 outColor;
+void main() {
+  vec2 p = gl_PointCoord * 2.0 - 1.0;
+  float d = length(p);
+  if (d > 1.0) discard;
+  // bright core -> palette colour -> transparent (additive glow marker)
+  float a = 1.0 - smoothstep(0.0, 1.0, d);
+  a *= a;
+  vec3 col = mix(vec3(1.0), v_color, smoothstep(0.0, 0.35, d));
+  outColor = vec4(col * a, a);
+}`;
+
   function compile(gl, type, src) {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, src);
@@ -278,7 +358,9 @@ void main() {
   // ---------------------------------------------------------------- state
   let gl = null, canvas = null;
   let progA = null, progT = null, fadeProg = null, presentProg = null;
+  let ovlLineProg = null, ovlPtProg = null;
   const uniA = {}, uniT = {}, uniF = {}, uniP = {};
+  const uniOL = {}, uniOP = {};
   let maxPointSize = 64;
   let cssW = 1, cssH = 1, dprV = 1;
 
@@ -286,6 +368,9 @@ void main() {
   let opqVao = null, opqVbo = null, opqCapFloats = 0;
   let bgVao = null, bgVbo = null, bgCount = 0;
   let texVao = null, texVbo = null, texCapFloats = 0;
+  let ovlLineVao = null, ovlLineVbo = null, ovlLineCapFloats = 0;
+  let ovlPtVao = null, ovlPtVbo = null, ovlPtCapFloats = 0;
+  let ovlPtScratch = new Float32Array(0);
 
   let scratch = new Float32Array(0);     // all bodies, additive pass
   let opqScratch = new Float32Array(0);  // planets + BHs, sorted
@@ -355,6 +440,97 @@ void main() {
     gl.bufferData(gl.ARRAY_BUFFER, opqCapFloats * 4, gl.DYNAMIC_DRAW);
     setupAttribs();
     gl.bindVertexArray(null);
+  }
+
+  function ensureOvlLineCapacity(floats) {
+    if (floats <= ovlLineCapFloats) return;
+    ovlLineCapFloats = Math.max(floats, ovlLineCapFloats * 2, 1024 * 6);
+    gl.bindVertexArray(ovlLineVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, ovlLineVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, ovlLineCapFloats * 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.bindVertexArray(null);
+  }
+
+  function ensureOvlPtCapacity(floats) {
+    if (floats <= ovlPtCapFloats) return;
+    ovlPtCapFloats = Math.max(floats, ovlPtCapFloats * 2, 256 * 5);
+    gl.bindVertexArray(ovlPtVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, ovlPtVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, ovlPtCapFloats * 4, gl.DYNAMIC_DRAW);
+    const stride = 5 * 4;                 // x,y,z, colorIdx, size
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, stride, 16);
+    gl.bindVertexArray(null);
+  }
+
+  /* Draw the ship overlay onto the default framebuffer, AFTER PostFX
+     present. Additive glowing GL_LINES (wireframe) + additive point
+     sprites (markers), in node-local space via the scene viewProj. */
+  function drawOverlay(overlay, viewProj) {
+    if (!overlay || !ovlLineProg) return;
+    const lines = overlay.lines;
+    const points = overlay.points;
+    const haveLines = lines && lines.length >= 6;
+    const havePoints = points && points.length > 0;
+    if (!haveLines && !havePoints) return;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);          // additive glow
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+
+    // ---- wireframe lines ----
+    if (haveLines) {
+      const lc = overlay.lineColor || [0.55, 0.95, 1.0];
+      const usable = lines.length - (lines.length % 6);  // whole segments
+      ensureOvlLineCapacity(usable);
+      gl.useProgram(ovlLineProg);
+      gl.uniformMatrix4fv(uniOL.viewProj, false, viewProj);
+      gl.uniform3f(uniOL.color, lc[0], lc[1], lc[2]);
+      gl.uniform1f(uniOL.intensity, overlay.intensity != null ? overlay.intensity : 0.9);
+      // best-effort thicker lines (most drivers clamp to 1; harmless)
+      try { gl.lineWidth(overlay.lineWidth != null ? overlay.lineWidth : 2); } catch (e) {}
+      gl.bindVertexArray(ovlLineVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, ovlLineVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, lines, 0, usable);
+      gl.drawArrays(gl.LINES, 0, usable / 3);
+    }
+
+    // ---- marker point sprites ----
+    if (havePoints) {
+      const np = points.length;
+      const floats = np * 5;
+      if (ovlPtScratch.length < floats) {
+        ovlPtScratch = new Float32Array(Math.max(floats, ovlPtScratch.length * 2));
+      }
+      let o = 0;
+      for (let k = 0; k < np; k++) {
+        const p = points[k];
+        ovlPtScratch[o++] = p.x; ovlPtScratch[o++] = p.y; ovlPtScratch[o++] = p.z;
+        ovlPtScratch[o++] = (p.colorIdx != null ? p.colorIdx : 8);
+        ovlPtScratch[o++] = (p.size != null ? p.size : 10);
+      }
+      ensureOvlPtCapacity(floats);
+      gl.useProgram(ovlPtProg);
+      gl.uniformMatrix4fv(uniOP.viewProj, false, viewProj);
+      gl.uniform1f(uniOP.dpr, dprV);
+      gl.uniform1f(uniOP.maxPointSize, maxPointSize);
+      gl.bindVertexArray(ovlPtVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, ovlPtVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, ovlPtScratch, 0, floats);
+      gl.drawArrays(gl.POINTS, 0, np);
+    }
+
+    gl.bindVertexArray(null);
+    gl.depthMask(true);
   }
 
   /* ~3000 static far stars on a sphere — drawn first every frame so
@@ -590,6 +766,8 @@ void main() {
         progT = link(gl, VERT_TEX_SRC, FRAG_SRC);
         fadeProg = link(gl, FADE_VERT_SRC, FADE_FRAG_SRC);
         presentProg = link(gl, FADE_VERT_SRC, PRESENT_FRAG_SRC);
+        ovlLineProg = link(gl, OVL_LINE_VERT_SRC, OVL_LINE_FRAG_SRC);
+        ovlPtProg = link(gl, OVL_PT_VERT_SRC, OVL_PT_FRAG_SRC);
       } catch (e) {
         return null;
       }
@@ -599,6 +777,13 @@ void main() {
       uniF.fade = gl.getUniformLocation(fadeProg, 'u_fade');
       uniF.fadeColor = gl.getUniformLocation(fadeProg, 'u_fadeColor');
       uniP.scene = gl.getUniformLocation(presentProg, 'u_scene');
+      uniOL.viewProj = gl.getUniformLocation(ovlLineProg, 'u_viewProj');
+      uniOL.color = gl.getUniformLocation(ovlLineProg, 'u_color');
+      uniOL.intensity = gl.getUniformLocation(ovlLineProg, 'u_intensity');
+      uniOP.viewProj = gl.getUniformLocation(ovlPtProg, 'u_viewProj');
+      uniOP.palette = gl.getUniformLocation(ovlPtProg, 'u_palette');
+      uniOP.dpr = gl.getUniformLocation(ovlPtProg, 'u_dpr');
+      uniOP.maxPointSize = gl.getUniformLocation(ovlPtProg, 'u_maxPointSize');
 
       const range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
       maxPointSize = (range && range[1]) ? range[1] : 64;
@@ -608,8 +793,8 @@ void main() {
                        gl.getExtension('EXT_color_buffer_half_float'));
 
       // palette is constant — upload once per program
-      const pal = new Float32Array(36);
-      for (let i = 0; i < 12; i++) {
+      const pal = new Float32Array(PAL_N * 3);
+      for (let i = 0; i < PAL_N; i++) {
         pal[i * 3] = PALETTE[i][0] / 255;
         pal[i * 3 + 1] = PALETTE[i][1] / 255;
         pal[i * 3 + 2] = PALETTE[i][2] / 255;
@@ -618,13 +803,19 @@ void main() {
       gl.uniform3fv(uniA.palette, pal);
       gl.useProgram(progT);
       gl.uniform3fv(uniT.palette, pal);
+      gl.useProgram(ovlPtProg);
+      gl.uniform3fv(uniOP.palette, pal);
 
       dynVao = gl.createVertexArray(); dynVbo = gl.createBuffer();
       opqVao = gl.createVertexArray(); opqVbo = gl.createBuffer();
       bgVao = gl.createVertexArray(); bgVbo = gl.createBuffer();
       texVao = gl.createVertexArray(); texVbo = gl.createBuffer();
+      ovlLineVao = gl.createVertexArray(); ovlLineVbo = gl.createBuffer();
+      ovlPtVao = gl.createVertexArray(); ovlPtVbo = gl.createBuffer();
       ensureDynCapacity(1);
       ensureOpqCapacity(1);
+      ensureOvlLineCapacity(1);
+      ensureOvlPtCapacity(1);
       buildBackground();
 
       gl.disable(gl.DEPTH_TEST);
@@ -733,7 +924,11 @@ void main() {
       gl.bindVertexArray(null);
 
       // ---- present: FBO -> default framebuffer (lensing lives here) ----
-      if (!haveTarget) return;           // emergency direct path
+      if (!haveTarget) {
+        // emergency direct path: scene already on the default framebuffer.
+        drawOverlay(opts.overlay, viewProj);
+        return;
+      }
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, canvas.width, canvas.height);
       const pf = globalThis.PostFX;
@@ -753,9 +948,14 @@ void main() {
         gl.drawArrays(gl.TRIANGLES, 0, 3);
         gl.enable(gl.BLEND);
       }
+
+      // ---- ship overlay: glowing wireframe + markers, in front, in the
+      // active node's local frame (same viewProj). No-op without opts. ----
+      drawOverlay(opts.overlay, viewProj);
     },
   };
 
   Renderer3D.PALETTE = PALETTE;
+  Renderer3D.PALETTE_N = PAL_N;
   globalThis.Renderer3D = Renderer3D;
 })();

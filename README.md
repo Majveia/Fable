@@ -13,6 +13,16 @@ steer, scroll to dive in, **F** to scan, **N** to jump, **h** for help.
 
 ![Spiral galaxy with a lensing black hole at its core](docs/spiral-galaxy.png)
 
+**v8 — WANDERER: walk your ship, light up the cosmos.**
+- **Be a person, not just a ship.** Press **X** to leave the pilot seat and
+  walk your ship's wireframe interior; **V** toggles first / third person —
+  flying *and* on foot (`js/game/avatar.js`, `js/game/shipmodel.js`). Your
+  ship renders as a glowing wireframe you can see in chase and walk views.
+- **A luminous, colorful cosmos.** Vivid emission nebulae (H-alpha red, OIII
+  teal, gold, violet, royal blue), richer bloom and exposure — *Cosmos*
+  grandeur × *Planet Earth* color. A grand-narration voice (`Lore.narrate`)
+  in the Sagan/Attenborough register.
+
 **v7 — DRIFTER, the playable layer:**
 - **Pilot a ship** through the persistent universe (`js/game/ship.js`):
   arcade-Newtonian flight, chase / cockpit / free cameras. The LOD engine

@@ -34,9 +34,80 @@ for (let i = 0; i < 100; i++) KEYS.push('u/g' + (i % 13) + '/s' + i + '/k' + (i 
 /* ---------------- module surface ---------------- */
 {
   assert(!!Lore, 'Lore attached to globalThis');
-  for (const fn of ['systemName', 'poiName', 'poiBlurb', 'bounty', 'discovery', 'shipName']) {
+  for (const fn of ['systemName', 'poiName', 'poiBlurb', 'bounty', 'discovery', 'shipName', 'narrate']) {
     assert(typeof Lore[fn] === 'function', 'Lore.' + fn + ' is a function');
   }
+}
+
+/* ---------------- narrate(kindOrKey): grand narration voice ---------------- */
+{
+  // determinism: same string -> identical line, forever.
+  let narrDet = true, narrClean = true;
+  for (const k of KEYS) {
+    if (Lore.narrate(k) !== Lore.narrate(k)) narrDet = false;
+    if (!clean(Lore.narrate(k))) narrClean = false;
+  }
+  // bare kinds are deterministic too, and subject-aware.
+  for (const kind of ['nursery', 'galaxy', 'black hole', 'planet', 'discovery', 'star']) {
+    if (Lore.narrate(kind) !== Lore.narrate(kind)) narrDet = false;
+    if (!clean(Lore.narrate(kind))) narrClean = false;
+  }
+  assert(narrDet, 'narrate deterministic across 100 keys + bare kinds');
+  assert(narrClean, 'narrate non-empty, no placeholder leaks');
+
+  // never empty, even for empty / nullish / junk arguments.
+  let edgeOk = true;
+  for (const arg of ['', undefined, null, 'zzz-unmapped-key', '/', 'u']) {
+    const s = Lore.narrate(arg);
+    if (!clean(s)) edgeOk = false;
+  }
+  assert(edgeOk, 'narrate(empty|null|junk) still yields a clean cosmic line');
+
+  // subject inference: a keyword or node-path hint maps to the right
+  // subject. The deepest/rightmost hint wins, so a planet leaf path
+  // ("u/g7/s3/p2") narrates a planet, not its parent galaxy.
+  let subjOk = true;
+  const subjChecks = [
+    ['nursery', 'nursery'], ['the nebula', 'nursery'], ['a stellar nursery', 'nursery'],
+    ['galaxy', 'galaxy'], ['u/g7', 'galaxy'], ['the spiral', 'galaxy'], ['cosmic web', 'galaxy'],
+    ['black hole', 'blackhole'], ['u/g7/s3/bh', 'blackhole'], ['event horizon', 'blackhole'],
+    ['planet', 'planet'], ['u/g7/s3/p2', 'planet'], ['a frozen world', 'planet'],
+    ['star', 'star'], ['u/g7/s3', 'star'], ['the pulsar', 'star'],
+    ['discovery', 'discovery'], ['anomaly', 'discovery'], ['beacon', 'discovery'],
+    ['', 'cosmos'], ['zzz-nothing', 'cosmos'],
+  ];
+  for (const [arg, subj] of subjChecks) {
+    const got = Lore._narrateSubject(arg);
+    if (got !== subj) {
+      subjOk = false;
+      console.log('   _narrateSubject(' + JSON.stringify(arg) + ') = ' + got + ', want ' + subj);
+    }
+  }
+  assert(subjOk, 'narrate infers subject from kind keyword / node-path hint (deepest wins)');
+
+  // variety: a broad mix of keys across all subjects yields many distinct
+  // narrations (each subject composes open x image x close ~= 125 lines).
+  const nset = new Set();
+  const tags = ['nursery', 'galaxy', 'black hole', 'planet', 'star', 'discovery', ''];
+  for (let i = 0; i < 280; i++) nset.add(Lore.narrate('u/g' + (i % 13) + '/s' + i + ':' + tags[i % tags.length]));
+  assert(nset.size >= 180, 'narrate variety: ' + nset.size + '/280 distinct across subjects (>=180)');
+
+  // each subject alone is varied (open x image x close composes broadly).
+  let perSubjOk = true;
+  for (const subj of ['nursery', 'galaxy', 'blackhole', 'planet', 'star', 'discovery', 'cosmos']) {
+    const s = new Set();
+    for (let i = 0; i < 60; i++) s.add(Lore.narrate('seed' + i + ':' + subj));
+    if (s.size < 25) { perSubjOk = false; console.log('   subject ' + subj + ' only ' + s.size + '/60'); }
+  }
+  assert(perSubjOk, 'narrate varied within each subject (>=25/60 per subject)');
+
+  // narration reads like a sentence: has the em-dash close, decent length.
+  let shapeOk = true;
+  for (const k of ['nursery', 'galaxy', 'u/g3/s1/p0', 'black hole', 'discovery']) {
+    const s = Lore.narrate(k);
+    if (s.length < 40 || s.indexOf('—') < 0) shapeOk = false;
+  }
+  assert(shapeOk, 'narrate composes a full awe-struck line (length + em-dash close)');
 }
 
 /* ---------------- determinism (same key -> identical output) ---------------- */
@@ -177,6 +248,10 @@ for (let i = 0; i < 100; i++) KEYS.push('u/g' + (i % 13) + '/s' + i + '/k' + (i 
     console.log('  ship     ', JSON.stringify(Lore.shipName(k)));
   }
   console.log('  toast    ', JSON.stringify(Lore.discovery('anomaly')));
+  console.log('  --- narration ---');
+  for (const k of ['nursery', 'galaxy', 'black hole', 'u/g7/s3/p2', 'discovery', 'u/g3/s1']) {
+    console.log('  narrate/' + k.padEnd(12), JSON.stringify(Lore.narrate(k)));
+  }
 }
 
 process.exit(failed ? 1 : 0);

@@ -354,6 +354,7 @@ function drifterHUD(input) {
     speed: sh.speed, throttle: input.thrust > 0 ? input.thrust : Math.min(1, sh.speed / ((Ship && Ship._topSpeed) || 1)),
     boost: !!input.boost, breadcrumb: breadcrumb(Navigator.active),
     coords: sh.pos, heading: [sh.yaw, sh.pitch], fps: fpsSmooth,
+    age: Cosmos.clockMyr, bodies: engine.bodyCount(), engineTag: modeTag,
     mode: walkMode ? ('walk ' + walkView) : ('fly ' + (camMode === 'cockpit' ? 'fp' : camMode === 'orbit' ? 'orbit' : 'tp')),
     scanProgress: globalThis.Drifter ? Drifter.scanProgress : 0,
     target, bounty: globalThis.Drifter ? Drifter.activeBounty : null,
@@ -419,6 +420,11 @@ function buildOverlay() {
     const p = shipToLocal(n.pos, b, scale, o);
     return { x: p[0], y: p[1], z: p[2], colorIdx: n.colorIdx, size: scale * 0.5 };
   });
+  // In walk mode, draw the avatar as a bright marker so you see yourself.
+  if (walkMode && globalThis.Avatar) {
+    const ap = shipToLocal(Avatar.state.pos, b, scale, o);
+    pts.push({ x: ap[0], y: ap[1] + scale * 0.06, z: ap[2], colorIdx: 8, size: scale * 0.9 });
+  }
   overlay = { lines: out, lineColor: ShipModel.lineColor || [0.32, 0.9, 1.0], points: pts, _b: b, _scale: scale };
   return overlay;
 }
@@ -839,6 +845,13 @@ function frame(now) {
     if (nav.changed) {
       loadCosmosNode(Navigator.active, false);
       spawnShip(Navigator.active);
+      // Snap the camera onto the freshly-spawned ship so it doesn't ease
+      // across the (possibly huge) scale gap — which would briefly place
+      // the camera far from the new node and bounce the LOD straight back.
+      if (globalThis.Ship && !walkMode) {
+        const g0 = Ship.cameraGoal(camMode);
+        if (g0) { Camera3D.setGoal(g0); Camera3D.snap(); }
+      }
       rebuildPOIs(Navigator.active);
       if (globalThis.HUD) HUD.toast('ENTERING · ' +
         (Navigator.active.name || nodeLabel(Navigator.active)).toUpperCase(), '#37e6ff');
