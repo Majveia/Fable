@@ -214,6 +214,7 @@ const KIND_LABEL = { universe: 'Universe', galaxy: 'Galaxy', system: 'System', p
 
 function nodeLabel(node) {
   if (node.id === 'u') return 'Universe';
+  if (node.name) return node.name;                    // named landmark (Sol, The Maw…)
   const tail = node.id.split('/').pop();              // e.g. "g9","s0","p2"
   const n = tail.replace(/^[a-z]/, '');
   return (KIND_LABEL[node.kind] || node.kind) + ' ' + n;
