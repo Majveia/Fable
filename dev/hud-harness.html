@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>HUD harness</title>
+<style>html,body{margin:0;height:100%;background:#05060a;overflow:hidden}</style></head>
+<body>
+<script src="../js/game/hud.js"></script>
+<script>
+HUD.init();
+HUD.update({
+  speed: 1240, throttle: 0.72, boost: true,
+  breadcrumb: 'Universe › New Cygnus › Bebop-7', coords: [3120, -88, 940],
+  heading: [0.6, -0.2], mode: 'chase', fps: 60,
+  scanProgress: 0.55,
+  target: { label: 'DERELICT · The Bebop', sx: 820, sy: 300, on: true, dist: 412 },
+  bounty: { name: 'Asimov Solensan', reward: 1200000, systemHint: 'Sector 7' },
+});
+HUD.logEntry('station', 'Red Dragon Anchorage', 'A neon hookah-bar of a trade post, perpetually 3am.');
+HUD.logEntry('anomaly', 'The Szechuan Rift', 'It hums. It should not hum. Do not approach without a permit you will never get.');
+HUD.logEntry('portal', 'Cygnus Gate C-137', 'Smells faintly of another dimension and burnt toast.');
+HUD.codex(true);
+HUD.toast('NEW · DERELICT · The Bebop');
+window.__ok = true;
+</script>
+</body></html>

@@ -161,14 +161,14 @@
       const t = s.target;
       if (t) {
         if (t.on) {
-          targetEl.style.display = '';
+          targetEl.style.display = 'block';
           targetEl.style.left = t.sx + 'px';
           targetEl.style.top = t.sy + 'px';
           targetEl.lastChild.nodeValue = t.label + (t.dist != null ? '  ' + fmtDist(t.dist) : '');
           arrowEl.style.display = 'none';
         } else {
           targetEl.style.display = 'none';
-          arrowEl.style.display = '';
+          arrowEl.style.display = 'block';
           const ang = Math.atan2(t.sy - H / 2, t.sx - W / 2);
           const rx = W * 0.42, ry = H * 0.42;
           arrowEl.style.left = (W / 2 + Math.cos(ang) * rx) + 'px';
@@ -178,7 +178,7 @@
       } else { targetEl.style.display = 'none'; arrowEl.style.display = 'none'; }
 
       if (s.bounty) {
-        bountyEl.style.display = '';
+        bountyEl.style.display = 'block';
         bountyEl.innerHTML = 'BOUNTY · ' + s.bounty.name + '<br>' +
           '<span class="rw">' + (s.bounty.reward ? s.bounty.reward.toLocaleString() + ' w' : '') + '</span>' +
           (s.bounty.systemHint ? '  → ' + s.bounty.systemHint : '');
