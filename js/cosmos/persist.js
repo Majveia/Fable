@@ -73,6 +73,7 @@
         seed: record.seed >>> 0,
         clockMyr: +record.clockMyr || 0,
         edits: Array.isArray(record.edits) ? record.edits : [],
+        game: record.game || null,        // DRIFTER discoveries/bounties
         lastVisitMs: Date.now(),
       };
       mem = rec;

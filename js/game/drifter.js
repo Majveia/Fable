@@ -7,7 +7,7 @@
    present, degrades gracefully when not (so it loads in Node).
    ============================================================ */
 (function () {
-  const SCAN_TIME = 1.6;   // seconds of sustained scan to log a POI
+  const SCAN_TIME = 1.0;   // seconds of sustained scan to log a POI
 
   function rngFrom(key) {
     let h = 0x811c9dc5;

@@ -1,14 +1,33 @@
-# FABLE UNIVERSE
+# FABLE : DRIFTER
 
-A real-time **3D** N-body universe in a single page of vanilla JavaScript.
-No frameworks, no build step, no dependencies. Open `index.html` — or visit
-the live deployment — and you're orbiting up to **2 million** gravitating
-bodies (WebGPU), half a million (WebGL2), or tens of thousands (CPU) —
-the engine picks the best your browser offers and falls back gracefully.
+A **playable universe** in one page of vanilla JavaScript — No Man's Sky ×
+Starfield × Cowboy Bebop × Rick and Morty. No frameworks, no build, no
+dependencies. You pilot a ship through one continuous, persistent cosmos:
+dive from the cosmic web into a galaxy, a star system, a planet's moons;
+scan points of interest; hunt bounties; build a codex. Underneath is a real
+N-body simulator running up to **2 million** gravitating bodies (WebGPU /
+WebGL2 / CPU, auto-selected with graceful fallback).
 
-**Live: https://majveia.github.io/Fable/**
+**Live: https://majveia.github.io/Fable/**  — press **W** to thrust, drag to
+steer, scroll to dive in, **F** to scan, **N** to jump, **h** for help.
 
 ![Spiral galaxy with a lensing black hole at its core](docs/spiral-galaxy.png)
+
+**v7 — DRIFTER, the playable layer:**
+- **Pilot a ship** through the persistent universe (`js/game/ship.js`):
+  arcade-Newtonian flight, chase / cockpit / free cameras. The LOD engine
+  streams the cosmos around you; the 8 old sandboxes are **merged in** as
+  named worlds you fly to (Sol, the Antennae, Orion Nursery, The Maw, …).
+- **Scan & discover** (`js/game/poi.js`): procedurally placed stations,
+  derelicts, beacons, and rare anomalies & portals; scan them into a codex.
+- **Bounties & lore** (`js/game/lore.js`): a deterministic four-voice text
+  generator names everything — "The Long Way Station 1670", bounties on
+  "Cobalt Volaju" — blending cosmic / corporate / noir / absurd registers.
+- **Neon-noir cockpit** (`js/game/hud.js`) + a synthesized **jazz-noir
+  score** (`js/game/score.js`). Your discoveries and the universe's age
+  **persist** between visits.
+- Verified in headless Chromium end-to-end: boot → fly → fast-travel → scan
+  → bounty → codex → reload-persists, zero page errors.
 
 **v6 — the persistent universe:**
 - **One seed, one continuous cosmos.** Instead of picking scenarios, you

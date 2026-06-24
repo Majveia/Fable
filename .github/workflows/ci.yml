@@ -24,6 +24,16 @@ jobs:
         run: node test/navigator.test.js
       - name: Persistence (aging clock) tests
         run: node test/persist.test.js
+      - name: DRIFTER lore (procedural text) tests
+        run: node test/lore.test.js
+      - name: DRIFTER points-of-interest tests
+        run: node test/poi.test.js
+      - name: DRIFTER ship flight-model tests
+        run: node test/ship.test.js
+      - name: DRIFTER landmarks (merged sandboxes) tests
+        run: node test/landmarks.test.js
+      - name: DRIFTER game-state tests
+        run: node test/drifter.test.js
       - name: Scenario smoke test
         run: node test/smoke.js
 
@@ -43,6 +53,8 @@ jobs:
         run: node test/gpu.browser.test.js
       - name: Persistent universe fly-through in headless Chromium
         run: node test/cosmos.browser.test.js
+      - name: DRIFTER playable loop in headless Chromium
+        run: node test/drifter.browser.test.js
 
   webgpu-smoke:
     runs-on: ubuntu-latest

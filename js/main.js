@@ -249,6 +249,99 @@ function loadCosmosNode(node, reframe) {
   $('breadcrumb').textContent = breadcrumb(node);
 }
 
+// ---- DRIFTER game state ----
+let camMode = 'chase';            // chase | cockpit | orbit
+let scanHeld = false;
+let pois = [];
+let lmList = [];
+let dtSecLast = 0.016;
+const heldKeys = {};
+const steer = { dx: 0, dy: 0 };
+let hudReady = false;
+
+function spawnShip(node) {
+  if (!globalThis.Ship) return;
+  const vr = node.viewRadius || node.radius || 1000;
+  Ship.reset({ viewRadius: vr });
+  const f = Ship.facing();                      // [0,0,1] at reset
+  const d = vr * 0.75;
+  Ship.state.pos = [-f[0] * d, -f[1] * d, -f[2] * d]; // sit back, nose toward content
+}
+
+function rebuildPOIs(node) {
+  pois = (globalThis.POI && node && node.kind !== 'universe') ? POI.forNode(node) : [];
+}
+
+function bountyTargets() {
+  const ids = lmList.map((l) => l.id);
+  if (Cosmos.root) {
+    const gals = Cosmos.root.children().filter((c) => !c.landmark).slice(0, 4);
+    for (const g of gals) { const s = g.children(); if (s && s[0]) ids.push(s[0].id); }
+  }
+  return ids.length ? ids : ['u'];
+}
+
+function buildShipInput() {
+  const i = { thrust: 0, pitch: 0, yaw: 0, roll: 0, boost: false };
+  if (heldKeys['w'] || heldKeys['arrowup']) i.thrust += 1;
+  if (heldKeys['s'] || heldKeys['arrowdown']) i.thrust -= 1;
+  if (heldKeys['a'] || heldKeys['arrowleft']) i.yaw -= 1;
+  if (heldKeys['d'] || heldKeys['arrowright']) i.yaw += 1;
+  if (heldKeys['q']) i.roll -= 1;
+  if (heldKeys['e']) i.roll += 1;
+  if (heldKeys['shift']) i.boost = true;
+  i.yaw += steer.dx; i.pitch += steer.dy;
+  steer.dx *= 0.55; steer.dy *= 0.55;
+  return i;
+}
+
+function dist3(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]); }
+
+function saveGame() {
+  if (!universeMode || !globalThis.Cosmos || !Cosmos.root) return;
+  const game = globalThis.Drifter ? Drifter.serialize() : null;
+  Persist.save({ seed: Cosmos.seed, clockMyr: Cosmos.clockMyr, edits: [], game });
+}
+
+// Project POIs to screen, pick the one nearest the reticle, run scanning,
+// and push the whole cockpit state to the HUD.
+function drifterHUD(input) {
+  if (!globalThis.HUD) return;
+  const vp = Camera3D.viewProj(W / H);
+  let best = null, bestD = Infinity, bestS = null;
+  for (const p of pois) {
+    const lp = p.localPos;
+    const cw = vp[3] * lp[0] + vp[7] * lp[1] + vp[11] * lp[2] + vp[15];
+    if (cw <= 0.05) continue;
+    const sx = ((vp[0] * lp[0] + vp[4] * lp[1] + vp[8] * lp[2] + vp[12]) / cw * 0.5 + 0.5) * W;
+    const sy = (1 - ((vp[1] * lp[0] + vp[5] * lp[1] + vp[9] * lp[2] + vp[13]) / cw * 0.5 + 0.5)) * H;
+    const d = Math.hypot(sx - W / 2, sy - H / 2);
+    if (d < bestD) { bestD = d; best = p; bestS = { sx, sy }; }
+  }
+  const reticleHit = best && bestD < Math.min(W, H) * 0.16;
+  if (globalThis.Drifter) {
+    const sc = Drifter.tickScan(dtSecLast, reticleHit ? best : null, scanHeld && reticleHit);
+    if (sc) {
+      HUD.discovery(sc);
+      if (globalThis.Score) Score.discovery();
+      saveGame();
+    }
+  }
+  const sh = globalThis.Ship ? Ship.state : { speed: 0, pos: [0, 0, 0], yaw: 0, pitch: 0 };
+  const target = best ? {
+    label: best.name, sx: bestS.sx, sy: bestS.sy,
+    on: bestS.sx >= 0 && bestS.sx <= W && bestS.sy >= 0 && bestS.sy <= H,
+    dist: dist3(sh.pos, best.localPos),
+  } : null;
+  HUD.update({
+    speed: sh.speed, throttle: input.thrust > 0 ? input.thrust : Math.min(1, sh.speed / ((Ship && Ship._topSpeed) || 1)),
+    boost: !!input.boost, breadcrumb: breadcrumb(Navigator.active),
+    coords: sh.pos, heading: [sh.yaw, sh.pitch], mode: camMode, fps: fpsSmooth,
+    scanProgress: globalThis.Drifter ? Drifter.scanProgress : 0,
+    target, bounty: globalThis.Drifter ? Drifter.activeBounty : null,
+  });
+}
+
 function enterUniverse(record) {
   universeMode = true;
   const seed = record ? record.seed : ((Math.random() * 2 ** 31) | 0) >>> 0;
@@ -256,15 +349,26 @@ function enterUniverse(record) {
   let agedMsg = '';
   if (record) {
     const aged = Persist.ageDelta(record.lastVisitMs, Date.now());
-    const target = (record.clockMyr || 0) + aged;
-    Cosmos.ageTo(target);
-    if (aged > 1) agedMsg = ' · aged ' + Math.round(aged) + ' Myr while away';
+    Cosmos.ageTo((record.clockMyr || 0) + aged);
+    if (aged > 1) agedMsg = ' · drifted ' + Math.round(aged) + ' Myr';
   }
+  if (globalThis.Landmarks) { try { Landmarks.inject(Cosmos); lmList = Landmarks.list(); } catch (e) { lmList = []; } }
   Navigator.init(Cosmos, Camera3D);
   Navigator.focusNode(Cosmos.root);
   loadCosmosNode(Cosmos.root, true);
+  spawnShip(Cosmos.root);
+  rebuildPOIs(Cosmos.root);
+  if (globalThis.HUD) { if (!hudReady) { HUD.init(); hudReady = true; } HUD.show(true);
+    if (globalThis.Drifter) HUD.loadEntries(Drifter.discoveries); }
+  if (globalThis.Drifter) {
+    Drifter.load(record && record.game);
+    Drifter._bountySeed = seed;
+    Drifter.refreshBounties(seed, bountyTargets());
+  }
+  camMode = 'chase';
   document.querySelectorAll('#dots span').forEach((d, k) => d.classList.toggle('on', k === 0));
-  toast('UNIVERSE' + agedMsg);
+  toast('DRIFTER' + agedMsg);
+  if (globalThis.HUD) HUD.toast('ADRIFT IN ' + (lmList.length ? Cosmos.root.children().length + ' WORLDS' : 'THE VOID'), '#37e6ff');
 }
 
 // ------------------------------------------------------------ focal-plane ray
@@ -376,6 +480,12 @@ canvas.addEventListener('pointermove', (e) => {
   }
   const dx = e.clientX - ptr.x, dy = e.clientY - ptr.y;
   ptr.x = e.clientX; ptr.y = e.clientY;
+  // In DRIFTER mode a drag flies the ship (flight-stick: pitch + yaw),
+  // unless you're in free orbit-cam. Otherwise it's the orbit camera.
+  if (universeMode && camMode !== 'orbit') {
+    if (ptr.down) { steer.dx += dx * 0.012; steer.dy += dy * 0.012; }
+    return;
+  }
   if (!ptr.down) return;
   if (ptr.button === 2 || ptr.shift) Camera3D.pan(dx, dy, H);
   else Camera3D.orbit(dx * 0.005, dy * 0.005);
@@ -384,8 +494,9 @@ canvas.addEventListener('pointermove', (e) => {
 const endPointer = (e) => {
   touches.delete(e.pointerId);
   if (touches.size < 2) pinchDist = 0;
-  // A click (not a drag) selects and tracks a body.
-  if (ptr.down && e.pointerType !== 'touch' && e.button === 0 &&
+  // A click (not a drag) tracks a body — sandbox only (drifter has its own
+  // reticle/scan loop).
+  if (!universeMode && ptr.down && e.pointerType !== 'touch' && e.button === 0 &&
       Math.hypot(e.clientX - ptr.downX, e.clientY - ptr.downY) < 6) {
     followSlot = pickBody(e.clientX, e.clientY);
     focusLabel(followSlot);
@@ -404,19 +515,58 @@ canvas.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ------------------------------------------------------------ keys
+const FLIGHT_KEYS = ['w', 'a', 's', 'd', 'q', 'e', 'shift',
+  'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
 window.addEventListener('keydown', (e) => {
   wake();
+  const lk = e.key.toLowerCase();
+  // In DRIFTER mode the movement keys are held flight controls — claim them
+  // before the discrete-action switch so WASD never toggles dark matter etc.
+  if (universeMode && FLIGHT_KEYS.indexOf(lk) >= 0) {
+    heldKeys[lk] = true;
+    if (lk.indexOf('arrow') === 0) e.preventDefault();
+    if (globalThis.Score) Score.poke();
+    return;
+  }
   if (e.repeat && e.key !== '[' && e.key !== ']') return;
   switch (e.key) {
     case ' ': e.preventDefault(); engine.cfg.paused = !engine.cfg.paused;
       toast(engine.cfg.paused ? 'PAUSED' : 'RESUMED'); break;
     case 't': trails = !trails; toast(trails ? 'TRAILS ON' : 'TRAILS OFF'); break;
     case 'u':
-      enterUniverse(null);   // jump into a fresh persistent universe
+      enterUniverse(null);   // jump into a fresh drifter universe
+      break;
+    case 'c':
+      if (universeMode) {
+        camMode = camMode === 'chase' ? 'cockpit' : camMode === 'cockpit' ? 'orbit' : 'chase';
+        toast('CAM · ' + camMode.toUpperCase());
+      }
+      break;
+    case 'f':
+      if (universeMode) { scanHeld = true; }
+      else if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen();
+      break;
+    case 'j':
+      if (universeMode && globalThis.Drifter && Drifter.bounties.length) {
+        const b = Drifter.bounties.find((x) => !x.done && x !== Drifter.activeBounty) || Drifter.bounties[0];
+        Drifter.acceptBounty(b);
+        if (globalThis.HUD) HUD.logBounty(b);
+        if (globalThis.Score) Score.bounty();
+      }
+      break;
+    case 'n':
+      if (universeMode) setCourseNextLandmark();
+      break;
+    case 'Tab':
+      e.preventDefault();
+      if (universeMode && globalThis.HUD) HUD.codex();
       break;
     case 'r':
-      if (universeMode) { Navigator.focusNode(Cosmos.root); loadCosmosNode(Cosmos.root, true); }
-      else loadScenario(scenarioIdx);
+      if (universeMode) {
+        Navigator.focusNode(Cosmos.root); loadCosmosNode(Cosmos.root, true);
+        spawnShip(Cosmos.root); rebuildPOIs(Cosmos.root);
+      } else loadScenario(scenarioIdx);
       break;
     case '[': engine.cfg.timeScale = Math.max(0, +(engine.cfg.timeScale - 0.1).toFixed(1));
       toast('TIME ' + engine.cfg.timeScale.toFixed(1) + 'x'); break;
@@ -439,21 +589,40 @@ window.addEventListener('keydown', (e) => {
       followSlot = -1; focusLabel(-1);
       break;
     case 'h': case '?': $('help').classList.toggle('show'); break;
-    case 'f':
+    case 'F': case 'F11':
       if (document.fullscreenElement) document.exitFullscreen();
       else document.documentElement.requestFullscreen();
       break;
-    case 'ArrowRight': loadScenario(scenarioIdx + 1); break;
-    case 'ArrowLeft': loadScenario(scenarioIdx - 1); break;
+    case 'ArrowRight': if (!universeMode) loadScenario(scenarioIdx + 1); break;
+    case 'ArrowLeft': if (!universeMode) loadScenario(scenarioIdx - 1); break;
     default: {
       const k = parseInt(e.key, 10);
-      if (k >= 1 && k <= Scenarios.list.length) loadScenario(k - 1);
+      if (k >= 1 && k <= Scenarios.list.length) loadScenario(k - 1);   // sandbox shortcut
     }
   }
 });
 window.addEventListener('keyup', (e) => {
+  const lk = e.key.toLowerCase();
+  heldKeys[lk] = false;
+  if (lk === 'f') scanHeld = false;
   if (e.key === 'g') { pulling = false; engine.clearPull(); }
 });
+
+// Fast-travel: cycle a course to the next named landmark (a merged sandbox).
+let lmIdx = -1;
+function setCourseNextLandmark() {
+  if (!lmList.length || !Cosmos.root) return;
+  lmIdx = (lmIdx + 1) % lmList.length;
+  const entry = lmList[lmIdx];
+  const node = Cosmos.root.children().find((c) => c.id === entry.id);
+  if (!node) return;
+  Navigator.focusNode(node);
+  loadCosmosNode(node, false);
+  spawnShip(node);
+  rebuildPOIs(node);
+  if (globalThis.HUD) HUD.toast('JUMP · ' + entry.name.toUpperCase(), '#ffb347');
+  if (globalThis.Score) Score.bounty();
+}
 
 // ------------------------------------------------------------ idle fade
 let idleTimer = null;
@@ -513,20 +682,38 @@ function frame(now) {
   engine.frame();
   engine.adaptQuality(fpsSmooth);
 
-  // Persistent-universe navigation: LOD active-node selection + floating
-  // origin. On a level change, repopulate the live engine with the new
-  // node and reframe. The cosmos clock advances as you watch (and other
-  // nodes age analytically for when you visit them).
+  // DRIFTER: pilot the ship; the camera follows it; the Navigator streams
+  // the universe (LOD + floating origin) around the ship's position; on a
+  // level change repopulate, respawn the ship, and rebuild this node's POIs.
   if (universeMode && globalThis.Navigator && Navigator.active) {
+    dtSecLast = dtMs / 1000;
+    const input = buildShipInput();
+    if (globalThis.Ship && camMode !== 'orbit' && !engine.cfg.paused) {
+      Ship.update(dtSecLast, input);
+      const goal = Ship.cameraGoal(camMode);
+      if (goal) Camera3D.setGoal(goal);
+      if (globalThis.Score) Score.setThrust(input.thrust > 0 ? (input.boost ? 1 : 0.6) : 0);
+    }
     const nav = Navigator.update(dtMs);
     if (nav.changed) {
-      loadCosmosNode(Navigator.active, true);
-      if (globalThis.Sound) Sound.thud();
+      loadCosmosNode(Navigator.active, false);
+      spawnShip(Navigator.active);
+      rebuildPOIs(Navigator.active);
+      if (globalThis.HUD) HUD.toast('ENTERING · ' +
+        (Navigator.active.name || nodeLabel(Navigator.active)).toUpperCase(), '#37e6ff');
+      if (globalThis.Score) Score.discovery();
+      if (globalThis.Drifter) {
+        const b = Drifter.completeBountyIfAt(Navigator.active.id);
+        if (b) { if (globalThis.HUD) HUD.toast('BOUNTY CLAIMED · ' + b.name +
+          ' · ' + (b.reward || 0).toLocaleString() + ' w', '#ffb347');
+          if (globalThis.Score) Score.bounty(); saveGame(); }
+      }
     }
     if (!engine.cfg.paused) {
       Cosmos.ageTo(Cosmos.clockMyr +
         engine.cfg.dt * engine.cfg.timeScale * engine.cfg.myrPerT);
     }
+    drifterHUD(input);
   }
 
   // Stellar evolution: every 10 frames, advance by accumulated sim-Myr.
@@ -576,12 +763,10 @@ function frame(now) {
 setInterval(() => {
   if (globalThis.Sound) Sound.setScale(Camera3D.dist);
   if (universeMode) {
-    const dt = Navigator.descendTarget ? Navigator.descendTarget() : null;
-    $('focus').textContent = dt ? '↡ ' + nodeLabel(dt) : '';
-    $('stat').textContent =
-      'age ' + Math.round(Cosmos.clockMyr).toLocaleString() + ' Myr · ' +
-      engine.bodyCount().toLocaleString() + ' bodies · ' +
-      Math.round(fpsSmooth) + ' fps · ' + modeTag;
+    // DRIFTER: the HUD owns the cockpit readout; keep the old chrome hidden.
+    $('stat').textContent = '';
+    $('focus').textContent = '';
+    $('breadcrumb').textContent = '';
   } else {
     if (followSlot >= 0) focusLabel(followSlot);
     $('stat').textContent =
@@ -591,10 +776,12 @@ setInterval(() => {
   }
 }, 400);
 
-// Autosave the universe (seed + clock) so it ages while you are away.
+// Autosave the drifter (seed + clock + discoveries/bounties) so the universe
+// ages and remembers what you found while you are away.
 function saveUniverse() {
   if (universeMode && globalThis.Cosmos && Cosmos.root) {
-    Persist.save({ seed: Cosmos.seed, clockMyr: Cosmos.clockMyr, edits: [] });
+    Persist.save({ seed: Cosmos.seed, clockMyr: Cosmos.clockMyr, edits: [],
+                   game: globalThis.Drifter ? Drifter.serialize() : null });
   }
 }
 setInterval(saveUniverse, 10000);
