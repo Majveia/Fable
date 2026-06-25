@@ -34,12 +34,15 @@
 (function () {
 
   // ---- Tunables (SHIP-SPACE units; the ship is ~16 units long) ----
-  const WALK_SPEED  = 4.5;    // planar speed cap when walking (u/s)
-  const RUN_MULT    = 2.1;    // run scales the speed cap
-  const ACCEL_HZ    = 9;      // approach rate toward the target velocity
-  const DAMP_HZ     = 7;      // bleed rate when there's no move input
-  const TURN_RATE   = 2.2;    // rad/s at full turn input
-  const PITCH_RATE  = 1.8;    // rad/s at full lookPitch input
+  // Retuned for a responsive FPS feel per the control-feel research: quick
+  // accel/decel (tau ~0.08-0.10s -> ACCEL/DAMP_HZ below), a ~1.7x run, and
+  // crisp turn/look rates so aim feels immediate, not floaty.
+  const WALK_SPEED  = 4.5;    // planar speed cap when walking (u/s) — in the 4-5 m/s band
+  const RUN_MULT    = 1.7;    // run scales the speed cap (research: 1.6-1.8x)
+  const ACCEL_HZ    = 12.5;   // approach rate toward target velocity (tau ~0.08s) — snappy start
+  const DAMP_HZ     = 10;     // bleed rate when idle (tau ~0.10s) — quick, crisp stop
+  const TURN_RATE   = 2.8;    // rad/s at full turn input — responsive
+  const PITCH_RATE  = 2.4;    // rad/s at full lookPitch input — responsive
   const PITCH_LIMIT = 1.4;    // |pitch| clamp (rad) — per contract (~±1.4)
   const MOVE_EPS    = 1e-4;   // |planar vel| below this => not "moving"
   const TWO_PI      = Math.PI * 2;

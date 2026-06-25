@@ -195,7 +195,9 @@ function makeGalaxy(opts) {
   place(dust, 0.001, 0.3, 0.8, 11, TYPE_DUST, 0.28, 0.7);
   // Molecular gas: soft billboards tracing the arms — kept out of the
   // bright core, where additive overlap would blow out the image.
-  place(gas, 0.001, 12, 26, -2, TYPE_GAS, 0.22, 0.6, radius * 0.22);
+  // v11 LUMINOUS: wider gas sprites so the molecular-cloud emission along the
+  // arms reads as glowing saturated colour (more additive overlap = grander).
+  place(gas, 0.001, 15, 32, -2, TYPE_GAS, 0.22, 0.6, radius * 0.22);
 
   // Spherical bulge, dispersion-supported.
   const bulgeN = Math.floor(stars * 0.12);
@@ -432,8 +434,10 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
     const [x, y, z, t] = sample();
     const d = Math.hypot(x, y, z) + 1;
     const v = Math.sqrt(totalM / Math.max(d, 200)) * 0.25;
-    // core sprites bigger (more overlap => glow), outer shells smaller.
-    const rv = rand(11, 30) * (1.0 - 0.45 * t);
+    // v11 LUMINOUS: bigger core sprites => more additive overlap => the
+    // nebula cores read as GLOWING colour, not a dim haze. Hot cores grow
+    // wider; outer shells stay a touch smaller so the gradient still reads.
+    const rv = rand(14, 38) * (1.0 - 0.42 * t);
     bodies.add(x, y, z,
       -x / d * v + gauss() * 0.4, -y / d * v + gauss() * 0.4, -z / d * v + gauss() * 0.4,
       0.001, rv, gasColorRadial(t), TYPE_GAS, null);
@@ -445,8 +449,10 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
     for (let i = 0; i < glowN; i++) {
       const gx = gauss() * c.s * 0.8, gy = gauss() * c.s * 0.5, gz = gauss() * c.s * 0.8;
       const x = c.x + gx, y = c.y + gy, z = c.z + gz;
+      // v11: larger luminous hearts so each nursery has a bright, saturated
+      // glowing core (H-alpha / OIII / gold), grander than before.
       bodies.add(x, y, z, gauss() * 0.2, gauss() * 0.2, gauss() * 0.2,
-        0.001, rand(34, 60), _rng() < 0.55 ? 12 : (_rng() < 0.5 ? 13 : 14), TYPE_GAS, null);
+        0.001, rand(42, 74), _rng() < 0.55 ? 12 : (_rng() < 0.5 ? 13 : 14), TYPE_GAS, null);
     }
   }
   // Layer 3 — fine dust falling slowly toward the cores (silhouette lanes).

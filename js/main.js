@@ -265,6 +265,10 @@ let lmList = [];
 let dtSecLast = 0.016;
 const heldKeys = {};
 const steer = { dx: 0, dy: 0 };
+// Mouse-look sensitivity: rad-of-input per pixel of drag. The whole
+// accumulated delta is drained as a [-1,1] rate command each frame (no
+// decaying buffer), so this maps a brisk ~25px drag to roughly full deflection.
+const STEER_SENS = 0.04;
 let hudReady = false;
 
 function spawnShip(node) {
@@ -298,10 +302,18 @@ function buildShipInput() {
   if (heldKeys['q']) i.roll -= 1;
   if (heldKeys['e']) i.roll += 1;
   if (heldKeys['shift']) i.boost = true;
-  i.yaw += steer.dx; i.pitch += steer.dy;
-  steer.dx *= 0.55; steer.dy *= 0.55;
+  // Mouse look: consume the whole accumulated delta this frame as a direct
+  // rate command (no decaying accumulator -> no input latency / floatiness),
+  // then drain it to 0 so nothing bleeds into later frames. steer.dy already
+  // carries the NON-INVERTED pitch sign (see pointermove), so +steer.dy = up.
+  i.yaw = clampUnit(i.yaw + steer.dx);
+  i.pitch = clampUnit(i.pitch + steer.dy);
+  steer.dx = 0; steer.dy = 0;
   return i;
 }
+
+// Clamp a control axis into the [-1,1] range the ship/avatar expect.
+function clampUnit(v) { return v < -1 ? -1 : (v > 1 ? 1 : v); }
 
 function dist3(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]); }
 
@@ -313,8 +325,11 @@ function buildAvatarInput() {
   if (heldKeys['a'] || heldKeys['arrowleft']) i.strafe -= 1;
   if (heldKeys['d'] || heldKeys['arrowright']) i.strafe += 1;
   if (heldKeys['shift']) i.run = true;
-  i.turn += steer.dx; i.lookPitch += steer.dy;
-  steer.dx *= 0.55; steer.dy *= 0.55;
+  // Same direct-drain mouse look as the ship: consume the accumulated delta
+  // as a rate command, no decay. steer.dy carries the NON-INVERTED pitch sign.
+  i.turn = clampUnit(i.turn + steer.dx);
+  i.lookPitch = clampUnit(i.lookPitch + steer.dy);
+  steer.dx = 0; steer.dy = 0;
   return i;
 }
 
@@ -707,7 +722,11 @@ canvas.addEventListener('pointermove', (e) => {
   // In DRIFTER mode a drag flies the ship (flight-stick: pitch + yaw),
   // unless you're in free orbit-cam. Otherwise it's the orbit camera.
   if (universeMode && camMode !== 'orbit') {
-    if (ptr.down) { steer.dx += dx * 0.012; steer.dy += dy * 0.012; }
+    // Accumulate RAW mouse delta as a direct steer command (drained whole each
+    // frame in buildShipInput/buildAvatarInput -> snappy, no decay lag).
+    // NON-INVERTED look: drag DOWN (dy>0) pitches/looks DOWN, so the pitch
+    // axis takes the NEGATED dy (matches research: pitch -= movementY).
+    if (ptr.down) { steer.dx += dx * STEER_SENS; steer.dy -= dy * STEER_SENS; }
     return;
   }
   if (!ptr.down) return;

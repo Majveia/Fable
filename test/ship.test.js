@@ -133,6 +133,23 @@ const finite3 = (v) => isFinite(v[0]) && isFinite(v[1]) && isFinite(v[2]);
     'Fy=' + Fc[1].toFixed(4));
 }
 
+// ---------------------------------------------------------- (4b) NON-INVERTED look axis
+{
+  // The input-mapping contract (js/main.js): drag DOWN negates dy, feeding a
+  // NEGATIVE pitch input, while the ship treats +pitch as nose UP. So we assert
+  // the sign convention this depends on: pitch input +1 raises the nose (look
+  // up, facing Y increases), pitch input -1 lowers it (look down). If this flips
+  // the mouse look would be inverted.
+  Ship.reset({ pos: [0, 0, 0], viewRadius: 1500 });
+  for (let i = 0; i < 10; i++) Ship.update(0.05, { pitch: 1 });
+  const up = Ship.facing()[1];
+  Ship.reset({ pos: [0, 0, 0], viewRadius: 1500 });
+  for (let i = 0; i < 10; i++) Ship.update(0.05, { pitch: -1 });
+  const down = Ship.facing()[1];
+  check('non-inverted: +pitch input looks UP, -pitch looks DOWN',
+    up > 0.05 && down < -0.05, 'up Fy=' + up.toFixed(3) + ' down Fy=' + down.toFixed(3));
+}
+
 // ---------------------------------------------------------- (5) speed == |vel|
 {
   Ship.reset({ pos: [0, 0, 0], viewRadius: 1500 });

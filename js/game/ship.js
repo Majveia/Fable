@@ -35,15 +35,20 @@
 (function () {
 
   // ---- Tunables (LOCAL-frame units; nodes are O(viewRadius) across) ----
-  const ACCEL        = 90;     // base thrust accel along facing (u/s^2)
+  // Retuned for a crisp, frictionless arcade-fighter feel (Squadrons/Everspace
+  // school): brisk turn rates so the ship "flies where it looks", and LIGHT
+  // lateral damping so inertia carries through drifts/boosts instead of feeling
+  // stuck. Rates sit in the agile-fighter band from the control-feel research
+  // (yaw/pitch ~115-135 deg/s, roll ~170 deg/s).
+  const ACCEL        = 130;    // base thrust accel along facing (u/s^2) — snappier off-the-line
   const BOOST        = 3.2;    // boost multiplier on accel AND top speed
-  const TOP_SPEED    = 420;    // cruise speed cap (u/s); boost lifts it
-  const DAMP_ALIGN   = 0.6;    // per-sec fraction of forward-aligned drift bled when coasting
-  const DAMP_LATERAL = 2.2;    // per-sec fraction of NON-aligned (sideways) velocity bled
+  const TOP_SPEED    = 460;    // cruise speed cap (u/s); boost lifts it
+  const DAMP_ALIGN   = 0.5;    // per-sec fraction of forward-aligned drift bled when coasting (gentle)
+  const DAMP_LATERAL = 1.3;    // per-sec lateral bleed — LIGHT so inertia carries (was 2.2, felt stuck)
   const PITCH_LIMIT  = 1.50;   // |pitch| clamp (rad) — short of PI/2 to dodge gimbal flip
-  const YAW_RATE     = 1.6;    // rad/s at full yaw input
-  const PITCH_RATE   = 1.4;    // rad/s at full pitch input
-  const ROLL_RATE    = 2.4;    // rad/s at full roll input
+  const YAW_RATE     = 2.35;   // rad/s at full yaw input (~135 deg/s) — crisp
+  const PITCH_RATE   = 2.05;   // rad/s at full pitch input (~117 deg/s)
+  const ROLL_RATE    = 3.0;    // rad/s at full roll input (~172 deg/s) — snappy bank
   const TWO_PI       = Math.PI * 2;
 
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -303,7 +308,7 @@
       // ---- 3) Gravity (-Y) + thrust along nose (boost scales accel) ----
       const thrust = clamp(+input.thrust || 0, -1, 1);
       const boost = !!input.boost;
-      const SURF_ACCEL = 28;           // lander thrust accel (u/s^2)
+      const SURF_ACCEL = 40;           // lander thrust accel (u/s^2) — punchier, responsive
       const SURF_BOOST = 2.2;          // boost multiplier
       const accel = SURF_ACCEL * (boost ? SURF_BOOST : 1);
       s.vel[1] -= this._surfGravity * dt;
@@ -312,7 +317,7 @@
       s.vel[2] += F[2] * thrust * accel * dt;
 
       // ---- 4) Mild linear drag (frame-rate-independent exp bleed) ----
-      const SURF_DRAG = 0.7;           // per-sec velocity bleed
+      const SURF_DRAG = 0.55;          // per-sec velocity bleed — lighter so it's not sluggish
       const keep = Math.exp(-SURF_DRAG * dt);
       s.vel[0] *= keep; s.vel[1] *= keep; s.vel[2] *= keep;
 

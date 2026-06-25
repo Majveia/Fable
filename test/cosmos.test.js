@@ -284,6 +284,12 @@ function descend(root, idxs) {
   }
   assert(colours.size >= 2, 'richness: system shows >=2 distinct planet colours (' + colours.size + ' of ' + planets.length + ')');
   assert(archs.size >= 1, 'richness: planet archetypes assigned (' + Array.from(archs).join(',') + ')');
+  // v11 VIVID: planet tints must stay in-range palette indices (renderer
+  // PALETTE valid through 17). Guards against muted/out-of-range colours
+  // that would dull the universe; determinism is unaffected.
+  let palOk = true;
+  for (const ci of colours) if (!(Number.isInteger(ci) && ci >= 0 && ci <= 17)) palOk = false;
+  assert(palOk, 'richness: planet colours are valid vivid palette indices (0..17)');
   assert(radVisOk, 'richness: every planet carries a positive visual radius (radVis)');
   assert(summaryOk, 'richness: planet summary exposes hasRing/hasAtmo booleans');
 

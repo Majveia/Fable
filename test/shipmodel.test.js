@@ -109,6 +109,43 @@ ShipModel.build();
   for (let i = 2; i < T.length; i += 3) { if (T[i] < zmin) zmin = T[i]; if (T[i] > zmax) zmax = T[i]; }
   check('solid hull spans nose +Z to engine -Z', zmax > 6 && zmin < -6,
     'z in [' + zmin.toFixed(1) + ',' + zmax.toFixed(1) + ']');
+
+  // detail level: the believable hull is meaningfully detailed (panel
+  // greebles, RCS quads, bell nozzles, sensor domes) -> a healthy tri count.
+  check('mesh is detailed (>= 400 triangles)', nTri >= 400, 'nTri=' + nTri);
+
+  // material colours are non-negative and finite; emissive (>1) is allowed
+  // ONLY for warm glowing parts (engine throat) — confirm at least one
+  // emissive-warm triangle exists (R>1 and R>G>B), and there is no spurious
+  // emissive blue/green (cool over-bright would look wrong under bloom).
+  let colNonNeg = true, warmEmissive = 0, badEmissive = 0;
+  for (let i = 0; i < C.length; i += 3) {
+    const r = C[i], g = C[i + 1], b = C[i + 2];
+    if (r < 0 || g < 0 || b < 0) colNonNeg = false;
+    if (r > 1 || g > 1 || b > 1) {
+      if (r > 1 && r >= g && g >= b) warmEmissive++;   // warm glow (engine)
+      else badEmissive++;                               // cool over-bright
+    }
+  }
+  check('all triColor channels non-negative', colNonNeg);
+  check('has warm emissive glow (engine throat, R>1, R>=G>=B)', warmEmissive > 0,
+    'warmEmissive=' + warmEmissive);
+  check('no cool/over-bright emissive material', badEmissive === 0,
+    'badEmissive=' + badEmissive);
+
+  // winding vs stored normals: the geometric face normal (from CCW winding)
+  // must agree (dot > 0) with the averaged stored vertex normal for EVERY
+  // triangle, so the solid hull never shades as an inverted/black face.
+  let inverted = 0;
+  for (let i = 0; i < T.length; i += 9) {
+    const ax = T[i+3]-T[i], ay = T[i+4]-T[i+1], az = T[i+5]-T[i+2];
+    const bx = T[i+6]-T[i], by = T[i+7]-T[i+1], bz = T[i+8]-T[i+2];
+    const fx = ay*bz-az*by, fy = az*bx-ax*bz, fz = ax*by-ay*bx;
+    const sx = N[i]+N[i+3]+N[i+6], sy = N[i+1]+N[i+4]+N[i+7], sz = N[i+2]+N[i+5]+N[i+8];
+    if (fx*sx + fy*sy + fz*sz < -1e-6) inverted++;
+  }
+  check('no inverted faces (winding agrees with stored normals)', inverted === 0,
+    'inverted=' + inverted);
 }
 
 // ---------------------------------------------------------- (3) bounds non-empty

@@ -30,25 +30,27 @@
   uniform sampler2D u_scene;
   in vec2 v_uv;
   out vec4 o;
+  // v11 LUMINOUS: chroma-preserving soft-knee bloom extraction. We threshold
+  // the per-channel max brightness with a soft knee ABOVE the faint starfield
+  // and individual star cores, so background stars stay crisp points and only
+  // bright nebula cores + the brightest star halos feed the glow. Crucially we
+  // multiply the ORIGINAL RGB by the knee factor (not a luminance-only mask),
+  // so the bloom keeps the nebula's HUE instead of becoming a white smear.
+  // The over-aggressive luminance ceiling that was tamping the glow is gone:
+  // the filmic shoulder in the final pass compresses the combined HDR signal.
+  const float BLOOM_THRESHOLD = 0.42;            // above the dim starfield floor
+  const float BLOOM_KNEE      = 0.55;            // soft onset width (0.5-0.7)
   void main() {
-    vec3 c = texture(u_scene, v_uv).rgb;
+    vec3 c = max(texture(u_scene, v_uv).rgb, vec3(0.0));
+    float br = max(c.r, max(c.g, c.b));          // per-channel max keeps hue
+    float knee = BLOOM_THRESHOLD * BLOOM_KNEE;
+    float soft = clamp(br - BLOOM_THRESHOLD + knee, 0.0, 2.0 * knee);
+    soft = soft * soft / (4.0 * knee + 1e-4);
+    float contrib = max(soft, br - BLOOM_THRESHOLD) / max(br, 1e-4);
+    // Gently push chroma into the bloom so the glow carries vivid hue.
     float l = dot(c, vec3(0.299, 0.587, 0.114));
-    // v9: a slightly lower, wider knee so colorful nebulae and bright
-    // cores bloom for a Cosmos glow, while faint background stars stay
-    // crisp (knee floor still above the dim starfield). Saturation is
-    // gently boosted so the bloom carries hue, not white.
-    float knee = smoothstep(0.32, 0.9, l);
-    vec3 sat = mix(vec3(l), c, 1.25);            // push chroma into bloom
-    // HUE-PRESERVING brightness clamp on the extracted bloom: where the
-    // raw HDR is extremely bright (dense overlapping gas), normalize by a
-    // soft luminance ceiling instead of letting every channel run away to
-    // white. This keeps the bloom that feeds the blur COLOURED at the top
-    // end rather than a white blob, which is the root of the blown core.
-    vec3 bloomC = max(sat, vec3(0.0)) * knee;
-    float bl = dot(bloomC, vec3(0.299, 0.587, 0.114));
-    float ceil = 2.2;                            // soft bloom luminance ceiling
-    if (bl > ceil) bloomC *= ceil / bl;          // scale RGB together (keep hue)
-    o = vec4(bloomC, 1.0);
+    vec3 sat = mix(vec3(l), c, 1.18);
+    o = vec4(max(sat, vec3(0.0)) * contrib, 1.0);
   }`;
 
   const BLUR_FS = `#version 300 es
@@ -75,30 +77,38 @@
   in vec2 v_uv;
   out vec4 o;
 
-  vec3 aces(vec3 x) {
-    return clamp(x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+  float luminance(vec3 v) { return dot(v, vec3(0.2126, 0.7152, 0.0722)); }
+
+  // ACES (Narkowicz 2015): a bright, punchy, saturated filmic operator with a
+  // gentle highlight roll-off. This is the BRIGHT default that replaces the
+  // dim luminance-only tonemap — saturated nebula colour stays vivid as it
+  // climbs into the shoulder instead of being pulled down toward grey.
+  vec3 acesNarkowicz(vec3 x) {
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
   }
-  // Scalar ACES on a single channel (used for luminance tone mapping).
-  float aces1(float x) {
-    return clamp(x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+
+  // Reinhard-Jodie: keeps chroma at high intensity (it tonemaps toward the
+  // per-channel Reinhard along the colour direction). We blend a little of it
+  // into the very brightest pixels so dense nebula cores read as GLOWING
+  // COLOUR rather than flattening to white — the single best fix for the
+  // white-blob problem — without dragging the overall image dim.
+  vec3 reinhardJodie(vec3 v) {
+    float l = luminance(v);
+    vec3 tv = v / (1.0 + v);
+    return mix(v / (1.0 + l), tv, tv);
   }
-  // HUE-PRESERVING tonemap: tone map the LUMINANCE, then re-apply the
-  // original chroma scaled by the luminance compression. The dense bright
-  // nebula core stays COLOURFUL (its hue is preserved) instead of every
-  // channel independently clamping to 1.0 and desaturating to flat white.
-  // ACES-style rolloff still bounds highlights so nothing hard-clips.
-  vec3 tonemapPreserveHue(vec3 c) {
-    float l = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
-    float lt = aces1(l);                          // tone-mapped luminance
-    // ratio compression: how much the luminance was pulled down.
-    vec3 ratio = c / l;                           // chroma direction (>=0)
-    // Reconstruct at the new luminance; mix toward a per-channel ACES at
-    // the very top so extreme values still roll into white gracefully
-    // (true blackbody-bright highlights), but most of the range keeps hue.
-    vec3 hueKept = ratio * lt;
-    vec3 perChan = aces(c);
-    float desat = smoothstep(0.85, 1.6, lt);      // only near the ceiling
-    return clamp(mix(hueKept, perChan, desat * 0.5), 0.0, 1.0);
+
+  // BRIGHT, COLOURFUL tonemap: ACES for punch + saturation everywhere, with a
+  // chroma-preserving Reinhard-Jodie mixed in only where the pre-tonemap HDR
+  // is very bright, so the brightest nebula cores keep their hue instead of
+  // clipping to flat white. Operates in linear; caller applies sRGB encode.
+  vec3 tonemapBright(vec3 c) {
+    vec3 aces = acesNarkowicz(c);
+    vec3 jodie = reinhardJodie(c);
+    // engage the colour-preserving blend only near/above the clipping point.
+    float hi = smoothstep(0.9, 2.2, max(c.r, max(c.g, c.b)));
+    return clamp(mix(aces, jodie, hi * 0.6), 0.0, 1.0);
   }
 
   void main() {
@@ -121,18 +131,24 @@
       shadow *= smoothstep(u_bh[i].w * 0.55, u_bh[i].w, r);
     }
     vec2 uv = clamp(sample_px / u_res, vec2(0.001), vec2(0.999));
-    // v8 WANDERER: lift bloom + a notch of exposure for a luminous,
-    // colorful Cosmos glow. ACES below keeps highlights from blowing to
-    // flat white, so it reads bright & vivid but stars stay readable.
+    // v11 LUMINOUS: composite scene + coloured bloom additively in LINEAR HDR,
+    // then raise EXPOSURE so the filmic shoulder actually engages, then a
+    // single BRIGHT tonemap (ACES + chroma-preserving highlight blend). This
+    // reverts the dim luminance-only path: the universe reads as glowing,
+    // saturated Cosmos/Hubble colour, not a grey haze.
+    const float BLOOM_K  = 1.85;         // luminous colored glow (was 1.4)
+    const float EXPOSURE = 1.32;         // lift so the shoulder engages
     vec3 scene = texture(u_scene, uv).rgb;
     vec3 bloom = texture(u_bloom, uv).rgb;
-    vec3 c = scene + bloom * 1.4;        // richer colored bloom
+    vec3 c = scene + bloom * BLOOM_K;    // additive HDR composite (linear)
     c += ring * vec3(0.75, 0.85, 1.0) * (c + vec3(0.06));
     c *= shadow;
-    c *= 1.05;                           // gentle exposure lift
-    // Hue-preserving tonemap keeps dense bright gas vivid (no white blob)
-    // while still rolling off true highlights ACES-style.
-    o = vec4(tonemapPreserveHue(c), 1.0);
+    c *= EXPOSURE;                       // expose BEFORE the tonemap
+    vec3 mapped = tonemapBright(c);      // bright, colourful filmic roll-off
+    // A touch of post-tonemap vividness for that extra Cosmos-TV pop without
+    // affecting clipping behaviour (mix toward colour, away from grey).
+    mapped = clamp(mix(vec3(luminance(mapped)), mapped, 1.12), 0.0, 1.0);
+    o = vec4(mapped, 1.0);
   }`;
 
   let gl = null, vao = null;

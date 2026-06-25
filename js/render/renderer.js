@@ -56,13 +56,13 @@
   // PALETTE.length and threaded into both body shaders, so adding more
   // entries here is safe as long as colorIdx stays in range.
   const PALETTE = [
-    [155, 176, 255], // 0 O  hot blue
-    [170, 191, 255], // 1 B
-    [202, 215, 255], // 2 A
-    [248, 247, 255], // 3 F  white
-    [255, 244, 234], // 4 G  sun-like
-    [255, 210, 161], // 5 K  orange
-    [255, 163, 110], // 6 M  red dwarf
+    [155, 176, 255], // 0 O  hot blue (blackbody ~35000K)
+    [181, 199, 255], // 1 B  bluish white (~15000K)
+    [216, 224, 255], // 2 A  blue-white (~8500K)
+    [248, 247, 255], // 3 F  white (~6800K)
+    [255, 244, 234], // 4 G  sun-like (~5500K)
+    [255, 214, 170], // 5 K  warm orange (~4300K)
+    [255, 176, 122], // 6 M  red dwarf (~3200K)
     [255, 220,  90], // 7 sun yellow
     [120, 200, 255], // 8 accretion blue
     [228, 110, 255], // 9 nebula magenta (vivid)
@@ -78,7 +78,7 @@
   const PAL_N = PALETTE.length;
 
   const FLOATS = 6; // x, y, z, rad, colorIdx, type
-  const BG_STAR_COUNT = 3000;
+  const BG_STAR_COUNT = 16000;
   const BG_RADIUS = 5e5;
   const CLEAR = [0.008, 0.008, 0.03]; // opaque near-black (#020208-ish)
   const TRAIL_FADE = 0.10;
@@ -951,27 +951,226 @@ void main() {
     gl.disable(gl.DEPTH_TEST);
   }
 
-  /* ~3000 static far stars on a sphere — drawn first every frame so
-     orbiting the camera produces background parallax. */
+  /* Static far starfield + Milky Way on a sphere — drawn first every
+     frame so orbiting the camera produces background parallax.
+
+     v9 BACKGROUND GRANDEUR. A layered, awe-inspiring sky built once
+     (STATIC_DRAW), deterministically (repo mulberry32 RNG so it's the
+     same every load and across reloads):
+       (1) a sparse uniform field of faint, mostly-red-dwarf stars,
+       (2) a dense Milky Way band concentrated toward galactic latitude
+           b=0 with a sech^2 falloff, a brighter central bulge, and a
+           thin off-center DUST LANE that splits the band,
+       (3) loose star clusters so the field isn't white-noise flat,
+       (4) a small set of faint distant galaxies / nebular smudges as
+           soft coloured gas (type 4) clouds for depth.
+     Star COLOUR is sampled from spectral-class weights (M-dwarf
+     dominated by count, the few hero stars skewed blue-white), and
+     point SIZE follows an apparent-magnitude power law (flux =
+     100^(-m/5)) so most stars are sub-pixel dim and only a handful
+     sparkle. */
   function buildBackground() {
-    const data = new Float32Array(BG_STAR_COUNT * FLOATS);
-    let o = 0;
-    for (let i = 0; i < BG_STAR_COUNT; i++) {
-      // uniform direction on the sphere
-      const z = Math.random() * 2 - 1;
-      const phi = Math.random() * Math.PI * 2;
-      const s = Math.sqrt(1 - z * z);
-      data[o++] = BG_RADIUS * s * Math.cos(phi);
-      data[o++] = BG_RADIUS * z;
-      data[o++] = BG_RADIUS * s * Math.sin(phi);
-      // tiny: most clamp to the 1.5px floor, a few sparkle larger
-      data[o++] = 120 + 700 * Math.pow(Math.random(), 4);
-      // cool-dwarf-dominated population, like v1
-      const u = Math.random();
-      data[o++] = u < 0.40 ? 6 : u < 0.62 ? 5 : u < 0.80 ? 4 : u < 0.90 ? 3 : u < 0.96 ? 2 : u < 0.99 ? 1 : 0;
-      data[o++] = 0; // type star
+    // Deterministic RNG (repo mulberry32 pattern) — fixed seed so the
+    // sky is identical every session and across reloads.
+    let _s = 0x9e3779b9 >>> 0;
+    function rand() {
+      _s |= 0; _s = (_s + 0x6d2b79f5) | 0;
+      let t = Math.imul(_s ^ (_s >>> 15), 1 | _s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     }
-    bgCount = BG_STAR_COUNT;
+    function gauss() { // Box-Muller, unit normal
+      const u = Math.max(1e-7, rand());
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(6.2831853 * rand());
+    }
+
+    // Galactic pole + center directions (J2000), used to give each
+    // star a galactic latitude b so the Milky Way band is physically
+    // placed rather than axis-aligned. Built once as world unit vectors.
+    function dirFromRaDec(raDeg, decDeg) {
+      const ra = raDeg * Math.PI / 180, dec = decDeg * Math.PI / 180;
+      const cd = Math.cos(dec);
+      return [cd * Math.cos(ra), cd * Math.sin(ra), Math.sin(dec)];
+    }
+    const gPole = dirFromRaDec(192.86, 27.13);   // galactic north pole
+    const gCent = dirFromRaDec(266.405, -28.936); // galactic center
+    // orthonormal galactic basis: gPole = +b axis, gCent in the plane
+    function sub(a, k, b) { return [a[0] - k * b[0], a[1] - k * b[1], a[2] - k * b[2]]; }
+    function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+    function norm(a) { const m = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / m, a[1] / m, a[2] / m]; }
+    function cross(a, b) {
+      return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    }
+    const gx = norm(sub(gCent, dot(gCent, gPole), gPole)); // toward center, in-plane
+    const gz = norm(gPole);                                 // out of plane (sin b)
+    const gy = cross(gz, gx);                               // completes plane
+
+    const data = new Float32Array(BG_STAR_COUNT * FLOATS);
+    let o = 0, count = 0;
+    const CAP = BG_STAR_COUNT;
+
+    // Spectral-class -> PALETTE index (0 O .. 6 M). Saturation toward
+    // white is handled in the shader core; we pick a hue and let faint
+    // stars stay near the red/orange of M which already reads warm.
+    // Magnitude -> render radius. The body shader maps radius to pixels
+    // via a_rad * sizeScale(6) * viewportH / w, clamped to >=1.5px, so
+    // we keep most radii small (sub-pixel after projection) and let a
+    // few hero stars be large. Reference radius tuned to the old field.
+    function magRadius(mag, magRef) {
+      const flux = Math.pow(10, -0.4 * (mag - magRef));
+      return 95 + 360 * Math.sqrt(Math.min(flux, 6.0));
+    }
+
+    // emit one star given a direction (unit), magnitude and class index
+    function emitStar(dx, dy, dz, mag, magRef, cls, type) {
+      if (count >= CAP) return false;
+      data[o++] = BG_RADIUS * dx;
+      data[o++] = BG_RADIUS * dy;
+      data[o++] = BG_RADIUS * dz;
+      data[o++] = magRadius(mag, magRef);
+      data[o++] = cls;
+      data[o++] = type;
+      count++;
+      return true;
+    }
+
+    // sample a spectral class index from a weighted CDF
+    function sampleClass(cdf) {
+      const u = rand();
+      for (let k = 0; k < cdf.length; k++) if (u < cdf[k]) return k;
+      return cdf.length - 1; // -> M
+    }
+    // BY COUNT (dim field, M-dwarf dominated). Indices 0..6 = O..M.
+    // weights O,B,A,F,G,K,M then reverse into palette order below.
+    // We store as cumulative over palette indices 0(O)..6(M).
+    const FIELD_CDF = cumWeights([0.000001, 0.0012, 0.0061, 0.030, 0.076, 0.12, 0.766]);
+    // BRIGHT VISIBLE (hero stars) — naked-eye sky skews blue-white.
+    const HERO_CDF = cumWeights([0.01, 0.16, 0.24, 0.18, 0.15, 0.16, 0.10]);
+    function cumWeights(w) {
+      const t = w.reduce((a, b) => a + b, 0);
+      const c = []; let acc = 0;
+      for (let i = 0; i < w.length; i++) { acc += w[i] / t; c.push(acc); }
+      return c;
+    }
+
+    // galactic latitude b (radians) of a unit direction
+    function latOf(x, y, z) { return Math.asin(Math.max(-1, Math.min(1, x * gz[0] + y * gz[1] + z * gz[2]))); }
+    // signed in-plane longitude offset from center (radians)
+    function lonOf(x, y, z) {
+      return Math.atan2(x * gy[0] + y * gy[1] + z * gy[2], x * gx[0] + y * gx[1] + z * gx[2]);
+    }
+
+    const B0 = 6.5 * Math.PI / 180;   // band half-thickness
+    const LANE_C = 0.6 * Math.PI / 180;
+    const LANE_W = 1.4 * Math.PI / 180;
+
+    // ---- (1) sparse uniform background field ----
+    const N_FIELD = Math.round(CAP * 0.34);
+    for (let i = 0; i < N_FIELD; i++) {
+      const z = rand() * 2 - 1, phi = rand() * Math.PI * 2, s = Math.sqrt(1 - z * z);
+      const x = s * Math.cos(phi), y = z, w = s * Math.sin(phi);
+      const hero = rand() < 0.04;
+      const cls = sampleClass(hero ? HERO_CDF : FIELD_CDF);
+      // magnitude biased faint (power law); hero stars brighter
+      const mag = hero ? (1.0 + 3.0 * Math.pow(rand(), 0.6))
+                       : (4.5 + 3.0 * Math.pow(rand(), 0.42));
+      emitStar(x, y, w, mag, 7.0, cls, 0);
+    }
+
+    // ---- (2) Milky Way band: dense dim stars, sech^2(b) accepted ----
+    const N_BAND = Math.round(CAP * 0.46);
+    let guard = 0;
+    for (let i = 0; i < N_BAND && count < CAP;) {
+      if (++guard > N_BAND * 40) break;
+      const z = rand() * 2 - 1, phi = rand() * Math.PI * 2, s = Math.sqrt(1 - z * z);
+      const x = s * Math.cos(phi), y = z, w = s * Math.sin(phi);
+      const b = latOf(x, y, w), l = lonOf(x, y, w);
+      let dens = Math.pow(1 / Math.cosh(b / B0), 2);
+      // central bulge longitudinal boost toward the galactic center
+      const bulge = Math.exp(-0.5 * (Math.pow(b / (12 * Math.PI / 180), 2) + Math.pow(l / (28 * Math.PI / 180), 2)));
+      dens += 0.85 * bulge;
+      // dust lane: thin off-center stripe removes most stars (split)
+      const lane = Math.exp(-0.5 * Math.pow((b - LANE_C) / LANE_W, 2));
+      dens *= 1 - 0.62 * lane;
+      if (rand() > dens) continue;
+      i++;
+      // band stars are numerous and faint; bulge stars warmer/brighter
+      const inBulge = bulge > 0.35 && rand() < bulge;
+      const cls = inBulge
+        ? (rand() < 0.55 ? 5 : rand() < 0.8 ? 4 : 6)   // bulge: warm K/G
+        : sampleClass(FIELD_CDF);
+      const mag = inBulge ? (4.0 + 2.5 * Math.pow(rand(), 0.5))
+                          : (5.5 + 3.0 * Math.pow(rand(), 0.42));
+      emitStar(x, y, w, mag, 7.0, cls, 0);
+    }
+
+    // ---- (3) loose star clusters (break up white-noise flatness) ----
+    const N_CLUMPS = 26;
+    for (let c = 0; c < N_CLUMPS && count < CAP; c++) {
+      // cluster center: bias toward the band so they reinforce it
+      let cz, cphi, cs, cx, cy, cw;
+      if (rand() < 0.6) {
+        // near band: pick small b
+        const bb = (rand() * 2 - 1) * B0 * 1.5;
+        const ll = (rand() * 2 - 1) * Math.PI;
+        const cb = Math.cos(bb), sb = Math.sin(bb), cl = Math.cos(ll), sl = Math.sin(ll);
+        cx = cb * cl * gx[0] + cb * sl * gy[0] + sb * gz[0];
+        cy = cb * cl * gx[1] + cb * sl * gy[1] + sb * gz[1];
+        cw = cb * cl * gx[2] + cb * sl * gy[2] + sb * gz[2];
+      } else {
+        cz = rand() * 2 - 1; cphi = rand() * Math.PI * 2; cs = Math.sqrt(1 - cz * cz);
+        cx = cs * Math.cos(cphi); cy = cz; cw = cs * Math.sin(cphi);
+      }
+      const spread = 0.012 + 0.05 * rand();
+      const nMembers = 20 + ((rand() * 60) | 0);
+      for (let m = 0; m < nMembers && count < CAP; m++) {
+        const x = cx + spread * gauss(), y = cy + spread * gauss(), w = cw + spread * gauss();
+        const inv = 1 / (Math.hypot(x, y, w) || 1);
+        const cls = sampleClass(rand() < 0.08 ? HERO_CDF : FIELD_CDF);
+        const mag = 5.0 + 3.0 * Math.pow(rand(), 0.45);
+        emitStar(x * inv, y * inv, w * inv, mag, 7.0, cls, 0);
+      }
+    }
+
+    // ---- (4) distant galaxies / nebular smudges (soft gas clouds) ----
+    // Each is a small cluster of faint coloured gas (type 4) points so
+    // they bloom into soft elliptical haze. Palette indices stay in the
+    // nebula range so hues read as dusty/coloured, not white.
+    const SMUDGES = [
+      // [bDeg, lDeg, sizeDeg, palIdx, alpha-ish density, count]
+      [62, 30, 7, 11, 0.9, 70],    // off-plane spiral (Andromeda-like), dusty
+      [-58, -120, 6, 11, 0.8, 55], // off-plane elliptical, cream/grey-blue
+      [2, 48, 9, 14, 0.6, 60],     // along band, warm gold dust glow
+      [-1, -65, 8, 13, 0.5, 55],   // along band, faint OIII teal-green
+      [18, 150, 6, 17, 0.5, 45],   // reflection-blue smudge
+      [-22, 95, 7, 9, 0.45, 45],   // faint magenta emission smudge
+    ];
+    for (let g = 0; g < SMUDGES.length && count < CAP; g++) {
+      const [bDeg, lDeg, sizeDeg, pal, , cnt] = SMUDGES[g];
+      const bb = bDeg * Math.PI / 180, ll = lDeg * Math.PI / 180;
+      const cb = Math.cos(bb), sb = Math.sin(bb), cl = Math.cos(ll), sl = Math.sin(ll);
+      const cx = cb * cl * gx[0] + cb * sl * gy[0] + sb * gz[0];
+      const cy = cb * cl * gx[1] + cb * sl * gy[1] + sb * gz[1];
+      const cw = cb * cl * gx[2] + cb * sl * gy[2] + sb * gz[2];
+      const sig = sizeDeg * Math.PI / 180;
+      // elongate slightly for a galaxy-like profile
+      const e = 0.45 + 0.4 * rand();
+      for (let m = 0; m < cnt && count < CAP; m++) {
+        const x = cx + sig * gauss(), y = cy + sig * e * gauss(), w = cw + sig * gauss();
+        const inv = 1 / (Math.hypot(x, y, w) || 1);
+        // gas radius drives a wide soft footprint; keep modest & varied
+        if (count >= CAP) break;
+        data[o++] = BG_RADIUS * x * inv;
+        data[o++] = BG_RADIUS * y * inv;
+        data[o++] = BG_RADIUS * w * inv;
+        data[o++] = 900 + 1400 * rand();
+        data[o++] = pal;
+        data[o++] = 4; // type gas (soft additive haze)
+        count++;
+      }
+    }
+
+    bgCount = count;
     gl.bindVertexArray(bgVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, bgVbo);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);

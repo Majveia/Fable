@@ -134,6 +134,22 @@ const NONE = { fwd: 0, strafe: 0, turn: 0, lookPitch: 0, run: false };
   check('lookPitch clamps near -1.4', dn >= -1.4 - 1e-9 && dn < -1.3, 'pitch=' + dn.toFixed(4));
 }
 
+// ---------------------------------------------------------- (4b) NON-INVERTED look axis
+{
+  // Mirrors the ship contract: the input mapping (js/main.js) negates drag-down
+  // so it feeds a NEGATIVE lookPitch (look down), and the avatar treats +pitch
+  // as look UP. Assert that sign convention: lookPitch +1 raises the look (fp
+  // forward Y > 0 = up), lookPitch -1 lowers it. A flip here = inverted mouse.
+  Avatar.reset({ seat: { pos: [0, 0, 0], forward: [0, 0, 1] } });
+  for (let i = 0; i < 8; i++) Avatar.update(0.05, { ...NONE, lookPitch: 1 }, BOX);
+  const up = Avatar.cameraMount('fp').forward[1];
+  Avatar.reset({ seat: { pos: [0, 0, 0], forward: [0, 0, 1] } });
+  for (let i = 0; i < 8; i++) Avatar.update(0.05, { ...NONE, lookPitch: -1 }, BOX);
+  const down = Avatar.cameraMount('fp').forward[1];
+  check('non-inverted: +lookPitch looks UP, -lookPitch looks DOWN',
+    up > 0.05 && down < -0.05, 'up=' + up.toFixed(3) + ' down=' + down.toFixed(3));
+}
+
 // ---------------------------------------------------------- (5) fp/tp mounts finite & distinct
 {
   Avatar.reset({ seat: { pos: [5, 0, 5], forward: [0, 0, 1] } });
