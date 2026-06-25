@@ -11,35 +11,15 @@
   let oscGain = null;
   let muted = false, started = false;
 
+  // The ambient drone was REMOVED per request — no background music. We keep
+  // a context + master so the discrete SFX (supernova, thud) still play.
   function start() {
     if (started || muted) return;
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
       master = ctx.createGain();
-      master.gain.value = 0.0;
+      master.gain.value = 0.5;
       master.connect(ctx.destination);
-
-      filter = ctx.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.value = 320;
-      filter.Q.value = 0.4;
-      filter.connect(master);
-
-      oscGain = ctx.createGain();
-      oscGain.gain.value = 0.16;
-      oscGain.connect(filter);
-
-      // Three slowly-beating detuned voices.
-      for (const [freq, det] of [[55, 0], [55.35, 0], [110.4, -4]]) {
-        const o = ctx.createOscillator();
-        o.type = 'triangle';
-        o.frequency.value = freq;
-        o.detune.value = det;
-        o.connect(oscGain);
-        o.start();
-      }
-      // Fade the drone in over 4 s.
-      master.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 4);
       started = true;
     } catch (e) { /* no audio — fine */ }
   }

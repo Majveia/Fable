@@ -65,10 +65,6 @@
   #hud-codex .e .k { color: ${C.amber}; letter-spacing: 2px; }
   #hud-codex .e .n { color: ${C.bone}; }
   #hud-codex .e .b { color: ${C.dim}; }
-  #hud-frame { position: fixed; inset: 0; pointer-events: none;
-    box-shadow: inset 0 0 180px rgba(0,0,4,.7); }
-  #hud-scanlines { position: fixed; inset: 0; pointer-events: none; opacity: .06;
-    background: repeating-linear-gradient(0deg, #fff 0, #fff 1px, transparent 1px, transparent 3px); }
   `;
 
   function el(tag, id, parent) { const e = document.createElement(tag); if (id) e.id = id; if (parent) parent.appendChild(e); return e; }
@@ -89,8 +85,6 @@
       const style = el('style'); style.textContent = CSS; document.head.appendChild(style);
       root = container || el('div', 'hud', document.body);
       root.id = 'hud'; root.className = 'fade';
-      el('div', 'hud-frame', root);
-      el('div', 'hud-scanlines', root);
 
       // centre reticle (svg)
       const ret = document.createElementNS(NS, 'svg'); ret.id = 'hud-reticle';

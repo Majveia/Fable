@@ -18,52 +18,19 @@
 
   function note(semi) { return ROOT * Math.pow(2, semi / 12); }
 
+  // NOTE: the musical bed (walking bass + pad + brushes) was REMOVED per
+  // request — no ambient music. We keep only a WebAudio context + master so
+  // the discrete sound EFFECTS (scan ping, discovery chime) still work.
   function start() {
     if (started || muted) return;
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
-      master = ctx.createGain(); master.gain.value = 0; master.connect(ctx.destination);
-      master.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 3);
-
-      bassGain = ctx.createGain(); bassGain.gain.value = 0.22; bassGain.connect(master);
-      padGain = ctx.createGain(); padGain.gain.value = 0.10;
-      const padFilt = ctx.createBiquadFilter(); padFilt.type = 'lowpass'; padFilt.frequency.value = 600;
-      padGain.connect(padFilt); padFilt.connect(master);
-      noiseGain = ctx.createGain(); noiseGain.gain.value = 0.0; noiseGain.connect(master);
-
-      // warm sustained pad (detuned triangles)
-      for (const iv of PAD) {
-        const o = ctx.createOscillator(); o.type = 'triangle';
-        o.frequency.value = note(12 + iv); o.detune.value = (iv === 0 ? -4 : 4);
-        o.connect(padGain); o.start();
-      }
-
+      master = ctx.createGain(); master.gain.value = 0.5; master.connect(ctx.destination);
       started = true;
-      step = 0;
-      tick();
     } catch (e) { /* no audio — fine */ }
   }
 
-  // Sequenced walking bass + a brushed-noise pulse, scheduled per beat.
-  function tick() {
-    if (!started || muted) { bedTimer = setTimeout(tick, BEAT * 1000); return; }
-    const t0 = ctx.currentTime + 0.02;
-    const semi = WALK[step % WALK.length];
-    // pluck a bass note
-    const o = ctx.createOscillator(); o.type = 'sawtooth';
-    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 240; f.Q.value = 3;
-    const g = ctx.createGain();
-    o.frequency.setValueAtTime(note(semi), t0);
-    g.gain.setValueAtTime(0.0, t0);
-    g.gain.linearRampToValueAtTime(1.0, t0 + 0.02);
-    g.gain.exponentialRampToValueAtTime(0.001, t0 + BEAT * 0.9);
-    o.connect(f); f.connect(g); g.connect(bassGain);
-    o.start(t0); o.stop(t0 + BEAT);
-    // brushed noise on the off-beats
-    if (step % 2 === 1) brush(t0, 0.05);
-    step++;
-    bedTimer = setTimeout(tick, BEAT * 1000);
-  }
+  function tick() { /* music bed removed */ }
 
   function brush(t0, amp) {
     const len = 0.18, buf = ctx.createBuffer(1, ctx.sampleRate * len, ctx.sampleRate);

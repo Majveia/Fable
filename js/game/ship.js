@@ -201,9 +201,11 @@
       // cosmic LOD levels (a system vs. the universe web).
       const unit = clamp(Math.sqrt(this._viewRadius / 1500), 0.4, 40);
       const tight   = mode === 'cockpit';
-      const dist    = (tight ? 14  : 60)  * unit;   // boom length
-      const ahead   = (tight ? 6   : 40)  * unit;   // look-ahead along F
-      const lift    = (tight ? 1.5 : 14)  * unit;   // raise the target (world +Y)
+      // Third person pulled WAY back so you see the whole ship + its
+      // surroundings; cockpit stays tight to the nose.
+      const dist    = (tight ? 12  : 150) * unit;   // boom length
+      const ahead   = (tight ? 5   : 30)  * unit;   // look-ahead along F
+      const lift    = (tight ? 1.2 : 34)  * unit;   // raise the target (world +Y)
 
       // Camera looks along +F: invert the camera's eye-offset relation.
       const camYaw   = wrap(s.yaw + Math.PI);
