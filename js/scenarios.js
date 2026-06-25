@@ -72,6 +72,41 @@ function gasColor() {
   return GAS_HUES[GAS_HUES.length - 1];
 }
 
+/* ---------------------------------------------------------------
+   RADIAL EMISSION GRADIENT for nebulae. Real emission nebulae are
+   hottest (most ionized) near their O/B stars and cool outward: a
+   hydrogen/H-alpha + OIII core, oxygen/gold mid-shell, and dusty
+   violet/magenta/royal-blue outer halo. `t` in [0,1] is the radial
+   fraction from a core; we weight the vivid palette by t so a cloud
+   reads as a Hubble-style colour gradient, not a flat haze.
+
+   Palette indices used (renderer PALETTE, valid through 17):
+     12 H-alpha red, 13 OIII teal-green, 10 nebula teal,
+     14 gold, 9 magenta, 15 violet, 16 vivid magenta, 17 royal blue.
+   --------------------------------------------------------------- */
+function gasColorRadial(t) {
+  const u = _rng();
+  if (t < 0.34) {
+    // Hot ionized CORE: H-alpha + OIII, with a teal/gold sprinkle.
+    if (u < 0.42) return 12;        // H-alpha red
+    if (u < 0.74) return 13;        // OIII teal-green
+    if (u < 0.90) return 10;        // nebula teal
+    return 14;                      // gold accent
+  }
+  if (t < 0.7) {
+    // Mid shell: gold + magenta + teal — the body of the cloud.
+    if (u < 0.34) return 14;        // gold
+    if (u < 0.62) return 9;         // magenta
+    if (u < 0.82) return 10;        // teal
+    return 12;                      // H-alpha threads
+  }
+  // Cool OUTER halo: violet / royal-blue / magenta dusty fringe.
+  if (u < 0.40) return 15;          // violet
+  if (u < 0.70) return 17;          // royal blue
+  if (u < 0.90) return 9;           // magenta
+  return 16;                        // vivid magenta
+}
+
 // Orthonormal basis (u, v) perpendicular to a unit normal n.
 function basisFor(nx, ny, nz) {
   let ux, uy, uz;
@@ -359,22 +394,62 @@ def('nebula', 'STELLAR NURSERY', (budget = DEF_BUDGET) => {
         c.m / nStars, rand(0.9, 2.2), _rng() < 0.6 ? 0 : 1, TYPE_STAR, null);
     }
   }
-  // The cloud: gas billboards + fine dust falling slowly toward the cores.
+  // FILAMENTS / TENDRILS: a few directed lanes threading between cores so
+  // the cloud has Hubble-style structure rather than fuzzy blobs. Each
+  // tendril is a line from one core toward another (or out into space)
+  // with gaussian thickness; gas sampled along it inherits a radial hue.
+  const tendrils = [];
+  for (let k = 0; k < CLUMPS; k++) {
+    const a = cores[k];
+    const b = cores[(k + 1 + ((_rng() * (CLUMPS - 1)) | 0)) % CLUMPS];
+    tendrils.push({ a, b, w: rand(28, 70) });
+  }
+
+  // Sample a cloud point. Returns [x,y,z, t] where t in [0,1] is the
+  // emission radial fraction (0 = hot core, 1 = cool outer halo). 65% of
+  // samples follow a core's gaussian envelope; 35% ride a tendril.
   const sample = () => {
+    if (_rng() < 0.35 && tendrils.length) {
+      const tl = tendrils[(_rng() * tendrils.length) | 0];
+      const f = _rng();
+      const x = tl.a.x + (tl.b.x - tl.a.x) * f + gauss() * tl.w;
+      const y = tl.a.y + (tl.b.y - tl.a.y) * f + gauss() * tl.w * 0.7;
+      const z = tl.a.z + (tl.b.z - tl.a.z) * f + gauss() * tl.w;
+      return [x, y, z, 0.45 + _rng() * 0.5];   // tendrils read as mid/outer shells
+    }
     const c = cores[(_rng() * CLUMPS) | 0];
-    return [c.x + gauss() * c.s * 2.6, c.y + gauss() * c.s * 1.6, c.z + gauss() * c.s * 2.6];
+    // radial fraction from gaussian magnitude: small -> core, large -> halo
+    const gx = gauss(), gy = gauss(), gz = gauss();
+    const mag = Math.min(1, (Math.abs(gx) + Math.abs(gy) + Math.abs(gz)) / 3);
+    return [c.x + gx * c.s * 2.6, c.y + gy * c.s * 1.6, c.z + gz * c.s * 2.6, mag];
   };
-  // Emission gas: the cathedral light of the nursery. A vivid spread of
-  // H-alpha red, OIII teal, gold and violet over the magenta base — a
-  // modest count bump (1100 -> 1500 cpu) traded mostly into colour.
-  for (let i = 0; i < (g ? 11000 * Math.min(X, 2) : 1500); i++) {
-    const [x, y, z] = sample();
+
+  // Layer 1 — bright emission CORE/shells: vivid billboards whose hue
+  // follows the radial gradient (hot core -> cool halo). The core sprites
+  // are LARGER and brighter; outer shells are cooler and a touch smaller,
+  // so dense overlap stacks colour instead of one flat magenta sheet.
+  for (let i = 0; i < (g ? 11000 * Math.min(X, 2) : 1700); i++) {
+    const [x, y, z, t] = sample();
     const d = Math.hypot(x, y, z) + 1;
     const v = Math.sqrt(totalM / Math.max(d, 200)) * 0.25;
+    // core sprites bigger (more overlap => glow), outer shells smaller.
+    const rv = rand(11, 30) * (1.0 - 0.45 * t);
     bodies.add(x, y, z,
       -x / d * v + gauss() * 0.4, -y / d * v + gauss() * 0.4, -z / d * v + gauss() * 0.4,
-      0.001, rand(10, 26), gasColor(), TYPE_GAS, null);
+      0.001, rv, gasColorRadial(t), TYPE_GAS, null);
   }
+  // Layer 2 — a sparse set of EXTRA-LARGE soft core glows right on the
+  // dense cores: a luminous heart for each nursery (few, big, hot hues).
+  for (const c of cores) {
+    const glowN = g ? 90 : 26;
+    for (let i = 0; i < glowN; i++) {
+      const gx = gauss() * c.s * 0.8, gy = gauss() * c.s * 0.5, gz = gauss() * c.s * 0.8;
+      const x = c.x + gx, y = c.y + gy, z = c.z + gz;
+      bodies.add(x, y, z, gauss() * 0.2, gauss() * 0.2, gauss() * 0.2,
+        0.001, rand(34, 60), _rng() < 0.55 ? 12 : (_rng() < 0.5 ? 13 : 14), TYPE_GAS, null);
+    }
+  }
+  // Layer 3 — fine dust falling slowly toward the cores (silhouette lanes).
   for (let i = 0; i < (g ? 60000 * X : 9000); i++) {
     const [x, y, z] = sample();
     const d = Math.hypot(x, y, z) + 1;
@@ -505,6 +580,7 @@ globalThis.Builders = {
   makeGalaxy,                 // ({cx,cy,cz,cvx,cvy,cvz,stars,dust,gas,radius,bhMass,tilt...})
   mulberry32,                 // seedable RNG factory
   starColor, gasColor,        // palette draws (gasColor: vivid emission set 9,10,12,13,14)
+  gasColorRadial,             // radial nebula gradient draw (core->halo, indices 9,10,12-17)
   GAS_HUES, GAS_WEIGHTS,      // the vivid gas-emission palette + weights (documented)
   basisFor, unitNormalFromTilt, gauss, rand,
   setRng(fn) { _rng = fn; },  // drive the module RNG (rand/gauss/makeGalaxy use it)

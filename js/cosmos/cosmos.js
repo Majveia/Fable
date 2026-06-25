@@ -256,10 +256,20 @@ function genPlanets(sys) {
     const cy = sys.ac[1] + (uy * ct + vy * st) * orad;
     const cz = sys.ac[2] + (uz * ct + vz * st) * orad;
     const id = sys.id + '/p' + k;
+    // Pick a distinct planet archetype (rocky/ocean/lava/ice/gas...) so
+    // worlds read differently. Stored on the summary (additive fields)
+    // and re-read by popSystem/popPlanet for consistent colour & size.
+    const arch = pickArchetype(r(), k, nPlanets);
+    const radVis = rand(arch.rLo, arch.rHi);
     const summary = {
-      colorIdx: (1 + ((r() * 6) | 0)),         // planetary palette range
+      colorIdx: arch.c,                        // archetype base tint
       brightness: rand(0.3, 0.8),
       kind: KIND_PLANET,
+      archetype: arch.k,                       // additive: archetype key
+      radVis,                                  // additive: visual radius
+      hasRing: r() < arch.ring,                // additive: ring system?
+      ringHue: arch.ringHue,                   // additive: ring dust tint
+      hasAtmo: arch.atmo,                      // additive: atmosphere halo?
     };
     kids[k] = makeNode(id, KIND_PLANET, 3, [cx, cy, cz], PLANET_CAPTURE, sys,
                        summary, sys._seed, PLANET_VIEW);
@@ -278,6 +288,51 @@ function starColorIdx(r) {
   if (u < 0.97) return 2;
   if (u < 0.99) return 1;
   return 0;
+}
+
+/* ---------------------------------------------------------------
+   PLANET ARCHETYPES. A small deterministic table mapping a draw to a
+   visibly distinct world: colour (PALETTE index), a visual-radius band,
+   and flags for rings / atmosphere haze. So flying between worlds shows
+   rocky vs ocean vs lava vs ice vs gas giants rather than near-identical
+   coloured dots. Drawn with an explicit rng -> deterministic per node.
+
+     colorIdx — base sphere tint (renderer PALETTE)
+     rLo,rHi  — visual-radius band (gas giants are large, rocky small)
+     ring     — base probability this archetype carries a ring system
+     atmo     — whether a translucent atmosphere halo is hinted
+     ringHue  — palette index for the ring dust (warm/icy tints, not 11)
+   --------------------------------------------------------------- */
+const ARCHETYPES = [
+  // key      colorIdx  rLo  rHi   ring  atmo  ringHue
+  { k: 'rocky', c: 6,  rLo: 2.0, rHi: 3.4, ring: 0.05, atmo: false, ringHue: 5 },  // grey/brown-red
+  { k: 'rocky2',c: 11, rLo: 2.2, rHi: 3.6, ring: 0.05, atmo: false, ringHue: 5 },  // grey
+  { k: 'ocean', c: 2,  rLo: 3.0, rHi: 4.2, ring: 0.10, atmo: true,  ringHue: 10 }, // blue world
+  { k: 'ocean2',c: 17, rLo: 3.0, rHi: 4.4, ring: 0.10, atmo: true,  ringHue: 10 }, // deep royal-blue
+  { k: 'lava',  c: 12, rLo: 2.4, rHi: 3.8, ring: 0.06, atmo: true,  ringHue: 14 }, // molten red
+  { k: 'desert',c: 14, rLo: 2.6, rHi: 3.8, ring: 0.08, atmo: true,  ringHue: 14 }, // gold/desert
+  { k: 'ice',   c: 3,  rLo: 2.6, rHi: 4.0, ring: 0.22, atmo: true,  ringHue: 8 },  // pale ice, icy rings
+  { k: 'ice2',  c: 8,  rLo: 2.8, rHi: 4.2, ring: 0.22, atmo: true,  ringHue: 8 },  // pale blue ice
+  { k: 'gas',   c: 5,  rLo: 5.4, rHi: 7.8, ring: 0.55, atmo: true,  ringHue: 4 },  // banded warm giant
+  { k: 'gas2',  c: 4,  rLo: 5.6, rHi: 8.0, ring: 0.55, atmo: true,  ringHue: 7 },  // banded gold giant
+  { k: 'gasIce',c: 1,  rLo: 5.0, rHi: 7.2, ring: 0.60, atmo: true,  ringHue: 8 },  // blue ice giant
+];
+
+// Pick an archetype for planet k. Inner orbits skew rocky/lava; the
+// outer orbits skew toward gas/ice giants — a loose Solar-System-like
+// gradient that still varies by seed. `r` is the per-node rng draw.
+function pickArchetype(rdraw, k, nPlanets) {
+  const frac = nPlanets > 1 ? k / (nPlanets - 1) : 0;
+  // bias: inner -> terrestrial set, outer -> giant set, with overlap.
+  if (frac < 0.4) {
+    const inner = [0, 1, 2, 3, 4, 5, 6, 7];           // terrestrial-ish
+    return ARCHETYPES[inner[(rdraw * inner.length) | 0]];
+  }
+  if (frac > 0.7) {
+    const outer = [6, 7, 8, 9, 10, 8, 9, 10];         // giants + ice (weighted)
+    return ARCHETYPES[outer[(rdraw * outer.length) | 0]];
+  }
+  return ARCHETYPES[(rdraw * ARCHETYPES.length) | 0]; // mid: anything
 }
 
 /* =====================  populate (live bodies)  ===================== */
@@ -427,20 +482,43 @@ function popSystem(node, budget, out) {
   const cph = Math.cos(phase), sph = Math.sin(phase);
   for (let k = 0; k < planetNodes.length; k++) {
     const pn = planetNodes[k];
+    const sm = pn.summary || {};
     // local position of the planet relative to the system center
     let lx = pn.ac[0] - node.ac[0], ly = pn.ac[1] - node.ac[1], lz = pn.ac[2] - node.ac[2];
     // rigid system rotation about Y by phase (re-entry after aging continuous)
     const rx = lx * cph - lz * sph, rz = lx * sph + lz * cph;
     lx = rx; lz = rz;
     const a = Math.sqrt(lx * lx + ly * ly + lz * lz) || 1;
-    const m = rand(1, 90);
-    const rv = rand(2.0, 7.6);
-    const c = pn.summary ? pn.summary.colorIdx : (1 + ((rand(0, 6)) | 0));
+    // Archetype drives radius & colour so the dot you flew toward matches
+    // the world you arrive at; mass scales with size (giants heavier).
+    const rv = (sm.radVis != null) ? sm.radVis : rand(2.0, 7.6);
+    const c = (sm.colorIdx != null) ? sm.colorIdx : (1 + ((rand(0, 6)) | 0));
+    const m = 1 + rv * rv * rand(0.8, 1.4);
     // circular-orbit speed; direction perpendicular to radius, in XZ-ish plane
     const v = Math.sqrt(SUN / a);
     const hx = -lz, hz = lx;                     // tangent in the XZ plane
     const hl = Math.hypot(hx, hz) || 1;
-    out.add(lx, ly, lz, hx / hl * v, 0, hz / hl * v, m, rv, c, TYPE_PLANET, pn.id);
+    const pvx = hx / hl * v, pvz = hz / hl * v;
+    out.add(lx, ly, lz, pvx, 0, pvz, m, rv, c, TYPE_PLANET, pn.id);
+
+    // Faint translucent ATMOSPHERE HALO around larger worlds: a thin
+    // shell of low-mass dust just above the surface, co-moving with the
+    // planet so it reads as a glowing rim, not a separate orbit. Subtle —
+    // a handful of soft sprites, budget-checked.
+    if (sm.hasAtmo && rv > 2.8 && out.n + 18 <= budget.maxBodies) {
+      const halo = g ? 18 : 12;
+      const haloC = (c === 12) ? 14 : (c === 6 || c === 11) ? 8 : 10; // warm/icy rim
+      for (let h = 0; h < halo; h++) {
+        const th = rand(0, 2 * Math.PI), ph = Math.acos(rand(-1, 1));
+        const rr = rv * 1.18;
+        const sx = rr * Math.sin(ph) * Math.cos(th);
+        const sy = rr * Math.cos(ph);
+        const sz = rr * Math.sin(ph) * Math.sin(th);
+        out.add(lx + sx, ly + sy, lz + sz, pvx, 0, pvz,
+                1e-6, rv * rand(0.5, 0.85), haloC, TYPE_DUST, null);
+        if (out.n + 1 > budget.maxBodies) break;
+      }
+    }
   }
 
   // Asteroid belt: low-inclination scatter, scaled to budget like solar.
@@ -452,7 +530,10 @@ function popSystem(node, budget, out) {
     const a = rand(beltLo, beltLo + 90);
     const anom = (rand(0, 2 * Math.PI) + phase) % (2 * Math.PI);
     const s = orbit(a, Math.abs(gauss()) * 8, rand(0, 6.28), anom, rand(0.97, 1.03));
-    out.add(s[0], s[1], s[2], s[3], s[4], s[5], 0.001, rand(0.3, 0.7), 5, TYPE_DUST, null);
+    // Slight rocky variety: mostly grey/brown, a few icy & metallic.
+    const u = rand(0, 1);
+    const bc = u < 0.7 ? 5 : u < 0.9 ? 11 : 8;
+    out.add(s[0], s[1], s[2], s[3], s[4], s[5], 0.001, rand(0.3, 0.7), bc, TYPE_DUST, null);
   }
   return {
     cfg: { dt: 0.05, substeps: 3, softening: 1.5, captureRadius: 4, myrPerT: 0.002 },
@@ -468,8 +549,28 @@ function popPlanet(node, budget, out) {
   const g = budget.gpu;
   const phase = node.phase;
   const PM = 60;     // planet mass (heavy enough to hold moons at this scale)
+  const sm = node.summary || {};
+  const isGiant = sm.archetype === 'gas' || sm.archetype === 'gas2' || sm.archetype === 'gasIce';
+  // Use the archetype's visual radius if present so the planet you arrive
+  // at matches the dot you flew toward in the system view.
+  const pRad = (sm.radVis != null) ? sm.radVis : rand(3.0, 6.0);
 
-  out.add(0, 0, 0, 0, 0, 0, PM, rand(3.0, 6.0), node.summary.colorIdx, TYPE_PLANET, 'Planet');
+  out.add(0, 0, 0, 0, 0, 0, PM, pRad, node.summary.colorIdx, TYPE_PLANET, 'Planet');
+
+  // Faint atmosphere halo shell around the planet (when the archetype has
+  // one): a thin translucent dust skin just above the surface. Subtle.
+  if (sm.hasAtmo && out.n + 24 <= budget.maxBodies) {
+    const halo = g ? 24 : 14;
+    const c = node.summary.colorIdx;
+    const haloC = (c === 12) ? 14 : (c === 6 || c === 11) ? 8 : 10;
+    for (let h = 0; h < halo; h++) {
+      const th = rand(0, 2 * Math.PI), ph = Math.acos(rand(-1, 1));
+      const rr = pRad * 1.16;
+      out.add(rr * Math.sin(ph) * Math.cos(th), rr * Math.cos(ph), rr * Math.sin(ph) * Math.sin(th),
+              0, 0, 0, 1e-6, pRad * rand(0.45, 0.8), haloC, TYPE_DUST, null);
+      if (out.n + 1 > budget.maxBodies) break;
+    }
+  }
 
   const orbit = (a, incDeg, asc, anom, speedMul = 1) => {
     const inc = incDeg * Math.PI / 180;
@@ -483,24 +584,42 @@ function popPlanet(node, budget, out) {
     ];
   };
 
-  const nMoons = MOONS_MIN + ((rand(0, 1) * (MOONS_MAX - MOONS_MIN + 1)) | 0);
+  // Moon count varies more by archetype: giants hold richer moon systems
+  // (up to ~6), terrestrials fewer. Sizes vary from tiny captured rocks to
+  // sizeable companions. The orbit spread scales with the host radius.
+  const moonCap = isGiant ? 6 : MOONS_MAX;
+  const nMoons = MOONS_MIN + ((rand(0, 1) * (moonCap - MOONS_MIN + 1)) | 0);
+  // Moon palette: rocky greys/browns, the odd icy one.
+  const moonHues = [11, 6, 3, 5, 8];
   for (let k = 0; k < nMoons; k++) {
-    const a = 4 + k * 3.5 + rand(-0.5, 0.5);
+    const a = pRad + 1.5 + k * (isGiant ? 3.2 : 3.5) + rand(-0.5, 0.5);
     const anom = (rand(0, 2 * Math.PI) + phase) % (2 * Math.PI);
-    const s = orbit(a, rand(0, 8), rand(0, 6.28), anom);
-    out.add(s[0], s[1], s[2], s[3], s[4], s[5], 0.05, rand(0.7, 1.1), 3, TYPE_PLANET, 'Moon' + k);
+    const s = orbit(a, rand(0, isGiant ? 5 : 9), rand(0, 6.28), anom);
+    const mc = moonHues[(rand(0, moonHues.length)) | 0];
+    const mr = rand(0.5, isGiant ? 1.5 : 1.1);
+    out.add(s[0], s[1], s[2], s[3], s[4], s[5], 0.05, mr, mc, TYPE_PLANET, 'Moon' + k);
   }
 
-  // A faint ring sometimes: dust on tight circular orbits.
-  if (rand(0, 1) < 0.4) {
+  // Ring system: more frequent (driven by archetype prob, giants ~55%)
+  // and more colourful — uses the archetype's ring tint (warm gold / icy
+  // blue) plus a second banded shade, not just flat dust grey.
+  const wantRing = (sm.hasRing != null) ? sm.hasRing
+                 : (rand(0, 1) < (isGiant ? 0.55 : 0.35));
+  if (wantRing) {
     const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
     const ringN = g ? 4000 * X : 900;
+    const ringHueA = (sm.ringHue != null) ? sm.ringHue : 11;
+    const ringHueB = ringHueA === 8 ? 2 : ringHueA === 14 ? 7 : 11; // banded partner
+    const rLo = pRad * 1.4, rHi = pRad * 2.4;       // ring annulus scales with planet
     for (let i = 0; i < ringN; i++) {
       if (out.n + 1 > budget.maxBodies) break;
-      const rr = rand(2.0, 3.4);
+      const rr = rand(rLo, rHi);
       const anom = (rand(0, 2 * Math.PI) + phase) % (2 * Math.PI);
       const s = orbit(rr, 5 + gauss() * 0.4, 1.0, anom);
-      out.add(s[0], s[1], s[2], s[3], s[4], s[5], 1e-6, rand(0.2, 0.45), 11, TYPE_DUST, null);
+      // banded: alternate the two ring tints by radius for a Saturn look.
+      const band = ((rr - rLo) / (rHi - rLo) * 5) | 0;
+      const rc = (band % 2 === 0) ? ringHueA : ringHueB;
+      out.add(s[0], s[1], s[2], s[3], s[4], s[5], 1e-6, rand(0.2, 0.45), rc, TYPE_DUST, null);
     }
   }
   return {

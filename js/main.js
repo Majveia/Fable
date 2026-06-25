@@ -340,6 +340,19 @@ function drifterHUD(input) {
     const sc = Drifter.tickScan(dtSecLast, reticleHit ? best : null, scanHeld && reticleHit);
     if (sc) {
       HUD.discovery(sc);
+      // Stations are inhabited — meet the souls aboard. Deterministic per
+      // station name, so the same port always has the same crew.
+      if (sc.kind === 'station' && globalThis.NPC) {
+        try {
+          const crew = NPC.atLandmark(sc.name || (best && best.id) || 'station');
+          if (crew && crew.length) {
+            const who = crew[0];
+            HUD.toast('MET · ' + who.name + ' — ' + who.role, '#ffb347');
+            if (sc.first) for (const p of crew)
+              HUD.logEntry('soul', p.name + ' · ' + p.species + ' · ' + p.role, NPC.greeting(p));
+          }
+        } catch (e) { /* NPC optional — never break the scan loop */ }
+      }
       if (globalThis.Score) Score.discovery();
       saveGame();
     }
@@ -416,6 +429,20 @@ function buildOverlay() {
     const p = shipToLocal([src[i], src[i + 1], src[i + 2]], b, scale, o);
     out[i] = p[0]; out[i + 1] = p[1]; out[i + 2] = p[2];
   }
+  // Solid hull mesh: transform tri positions ship->local (per vertex) and the
+  // normals by the ship basis ROTATION only (no translation/scale), renorm.
+  const stris = ShipModel.tris || new Float32Array(0);
+  const snorm = ShipModel.norms || new Float32Array(0);
+  const triOut = new Float32Array(stris.length);
+  const nrmOut = new Float32Array(snorm.length);
+  for (let i = 0; i < stris.length; i += 3) {
+    const p = shipToLocal([stris[i], stris[i + 1], stris[i + 2]], b, scale, o);
+    triOut[i] = p[0]; triOut[i + 1] = p[1]; triOut[i + 2] = p[2];
+  }
+  for (let i = 0; i < snorm.length; i += 3) {
+    const n = norm(shipDirToLocal([snorm[i], snorm[i + 1], snorm[i + 2]], b));
+    nrmOut[i] = n[0]; nrmOut[i + 1] = n[1]; nrmOut[i + 2] = n[2];
+  }
   const pts = (ShipModel.nodes || []).map((n) => {
     const p = shipToLocal(n.pos, b, scale, o);
     return { x: p[0], y: p[1], z: p[2], colorIdx: n.colorIdx, size: scale * 0.5 };
@@ -425,7 +452,12 @@ function buildOverlay() {
     const ap = shipToLocal(Avatar.state.pos, b, scale, o);
     pts.push({ x: ap[0], y: ap[1] + scale * 0.06, z: ap[2], colorIdx: 8, size: scale * 0.9 });
   }
-  overlay = { lines: out, lineColor: ShipModel.lineColor || [0.32, 0.9, 1.0], points: pts, _b: b, _scale: scale };
+  overlay = {
+    lines: out, lineColor: ShipModel.lineColor || [0.32, 0.9, 1.0], points: pts,
+    tris: triOut, norms: nrmOut, triColor: ShipModel.triColor || null,
+    lightDir: norm([0.4, 0.8, 0.3]),
+    _b: b, _scale: scale,
+  };
   return overlay;
 }
 

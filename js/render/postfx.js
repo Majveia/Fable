@@ -33,13 +33,22 @@
   void main() {
     vec3 c = texture(u_scene, v_uv).rgb;
     float l = dot(c, vec3(0.299, 0.587, 0.114));
-    // v8: a slightly lower, wider knee so colorful nebulae and bright
+    // v9: a slightly lower, wider knee so colorful nebulae and bright
     // cores bloom for a Cosmos glow, while faint background stars stay
     // crisp (knee floor still above the dim starfield). Saturation is
     // gently boosted so the bloom carries hue, not white.
     float knee = smoothstep(0.32, 0.9, l);
     vec3 sat = mix(vec3(l), c, 1.25);            // push chroma into bloom
-    o = vec4(max(sat, vec3(0.0)) * knee, 1.0);
+    // HUE-PRESERVING brightness clamp on the extracted bloom: where the
+    // raw HDR is extremely bright (dense overlapping gas), normalize by a
+    // soft luminance ceiling instead of letting every channel run away to
+    // white. This keeps the bloom that feeds the blur COLOURED at the top
+    // end rather than a white blob, which is the root of the blown core.
+    vec3 bloomC = max(sat, vec3(0.0)) * knee;
+    float bl = dot(bloomC, vec3(0.299, 0.587, 0.114));
+    float ceil = 2.2;                            // soft bloom luminance ceiling
+    if (bl > ceil) bloomC *= ceil / bl;          // scale RGB together (keep hue)
+    o = vec4(bloomC, 1.0);
   }`;
 
   const BLUR_FS = `#version 300 es
@@ -68,6 +77,28 @@
 
   vec3 aces(vec3 x) {
     return clamp(x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+  }
+  // Scalar ACES on a single channel (used for luminance tone mapping).
+  float aces1(float x) {
+    return clamp(x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+  }
+  // HUE-PRESERVING tonemap: tone map the LUMINANCE, then re-apply the
+  // original chroma scaled by the luminance compression. The dense bright
+  // nebula core stays COLOURFUL (its hue is preserved) instead of every
+  // channel independently clamping to 1.0 and desaturating to flat white.
+  // ACES-style rolloff still bounds highlights so nothing hard-clips.
+  vec3 tonemapPreserveHue(vec3 c) {
+    float l = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
+    float lt = aces1(l);                          // tone-mapped luminance
+    // ratio compression: how much the luminance was pulled down.
+    vec3 ratio = c / l;                           // chroma direction (>=0)
+    // Reconstruct at the new luminance; mix toward a per-channel ACES at
+    // the very top so extreme values still roll into white gracefully
+    // (true blackbody-bright highlights), but most of the range keeps hue.
+    vec3 hueKept = ratio * lt;
+    vec3 perChan = aces(c);
+    float desat = smoothstep(0.85, 1.6, lt);      // only near the ceiling
+    return clamp(mix(hueKept, perChan, desat * 0.5), 0.0, 1.0);
   }
 
   void main() {
@@ -99,7 +130,9 @@
     c += ring * vec3(0.75, 0.85, 1.0) * (c + vec3(0.06));
     c *= shadow;
     c *= 1.05;                           // gentle exposure lift
-    o = vec4(aces(c), 1.0);
+    // Hue-preserving tonemap keeps dense bright gas vivid (no white blob)
+    // while still rolling off true highlights ACES-style.
+    o = vec4(tonemapPreserveHue(c), 1.0);
   }`;
 
   let gl = null, vao = null;

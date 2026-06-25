@@ -78,6 +78,39 @@ ShipModel.build();
     'z in [' + zmin.toFixed(1) + ',' + zmax.toFixed(1) + ']');
 }
 
+// ---------------------------------------------------------- (2b) solid mesh: tris/norms/triColor
+{
+  const T = ShipModel.tris, N = ShipModel.norms, C = ShipModel.triColor;
+  check('tris is a Float32Array', T instanceof Float32Array);
+  check('norms is a Float32Array', N instanceof Float32Array);
+  check('triColor is a Float32Array', C instanceof Float32Array);
+  check('tris non-empty', T.length > 0, 'len=' + T.length);
+  check('tris length multiple of 9 (3 verts x xyz)', T.length % 9 === 0, 'len=' + T.length);
+  check('norms length matches tris', N.length === T.length, 'tris=' + T.length + ' norms=' + N.length);
+  const nTri = T.length / 9;
+  check('triColor length is 3 per triangle', C.length === nTri * 3,
+    'triColor=' + C.length + ' expected=' + (nTri * 3));
+  // all finite
+  let allFin = true;
+  for (let i = 0; i < T.length; i++) if (!isFinite(T[i]) || !isFinite(N[i])) { allFin = false; break; }
+  for (let i = 0; i < C.length; i++) if (!isFinite(C[i])) { allFin = false; break; }
+  check('all tri/norm/color values finite', allFin);
+  // every per-vertex normal is approximately unit length
+  let unitOk = true, worst = 0;
+  for (let i = 0; i < N.length; i += 3) {
+    const l = Math.hypot(N[i], N[i + 1], N[i + 2]);
+    const e = Math.abs(l - 1);
+    if (e > worst) worst = e;
+    if (e > 1e-3) { unitOk = false; }
+  }
+  check('all normals approximately unit length (<=1e-3)', unitOk, 'worst err=' + worst.toExponential(2));
+  // mesh spans nose (+Z) to engine (-Z) like the wireframe.
+  let zmin = Infinity, zmax = -Infinity;
+  for (let i = 2; i < T.length; i += 3) { if (T[i] < zmin) zmin = T[i]; if (T[i] > zmax) zmax = T[i]; }
+  check('solid hull spans nose +Z to engine -Z', zmax > 6 && zmin < -6,
+    'z in [' + zmin.toFixed(1) + ',' + zmax.toFixed(1) + ']');
+}
+
 // ---------------------------------------------------------- (3) bounds non-empty
 {
   const bs = ShipModel.bounds;
@@ -89,6 +122,21 @@ ShipModel.build();
     if (!(b.max[0] > b.min[0] && b.max[1] > b.min[1] && b.max[2] > b.min[2])) ok = false;
   }
   check('every bound has finite min<max (non-degenerate volume)', ok);
+
+  // bounds union is CONTINUOUS in Z: sort by zmin, each next interval must
+  // start at or before the running max so there is no unwalkable seam.
+  const ranges = bs.map(b => [b.min[2], b.max[2]]).sort((a, b) => a[0] - b[0]);
+  let contiguous = true, reach = ranges.length ? ranges[0][1] : 0;
+  for (let i = 1; i < ranges.length; i++) {
+    if (ranges[i][0] > reach + 1e-9) { contiguous = false; break; }
+    if (ranges[i][1] > reach) reach = ranges[i][1];
+  }
+  check('bounds union is continuous in Z (no unwalkable seam)', contiguous,
+    'ranges=' + JSON.stringify(ranges));
+
+  // seat sits inside some bound (cockpit).
+  check('seat.pos inside a bound', insideAny(ShipModel.seat.pos, bs),
+    'seat=[' + ShipModel.seat.pos.map(v => v.toFixed(2)).join(',') + ']');
 }
 
 // ---------------------------------------------------------- (4) clamp: far outside -> inside
@@ -165,6 +213,7 @@ ShipModel.build();
 {
   // capture, force a rebuild with the same default seed, compare byte-for-byte.
   const a = ShipModel.lines.slice();
+  const at = ShipModel.tris.slice();
   ShipModel._seed = null;             // bust the cache to force a real rebuild
   ShipModel.build();
   const b = ShipModel.lines;
@@ -172,6 +221,11 @@ ShipModel.build();
   if (same) for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { same = false; break; }
   check('two build() calls produce identical lines (deterministic)', same,
     'len ' + a.length + ' vs ' + b.length);
+  const bt = ShipModel.tris;
+  let tsame = at.length === bt.length;
+  if (tsame) for (let i = 0; i < at.length; i++) if (at[i] !== bt[i]) { tsame = false; break; }
+  check('two build() calls produce identical tris (deterministic)', tsame,
+    'len ' + at.length + ' vs ' + bt.length);
 
   // same seed -> identical; different seed -> still valid (finite, %6).
   ShipModel.build(7); const s7 = ShipModel.lines.slice();

@@ -242,5 +242,67 @@ function descend(root, idxs) {
     ' rad, ~pi expected; tilt preserved ' + L0.tilt.toFixed(2) + '->' + L1.tilt.toFixed(2) + ')');
 }
 
+/* ---------------- (g) planet/moon richness + determinism ---------------- */
+{
+  // Same seed -> identical system body count and first-planet colour
+  // (archetype generation must stay deterministic).
+  const run = () => {
+    const root = Cosmos.create(7);
+    const sys = root.children()[7].children()[3];
+    Cosmos.ageTo(0);
+    Bodies.clear();
+    sys.populate(BUDGET, Bodies);
+    // first planet body is the first TYPE_PLANET after the star.
+    let firstPlanetColor = -1;
+    for (let i = 0; i < Bodies.n; i++) {
+      if (Bodies.type[i] === 2 && Bodies.names[i] && Bodies.names[i] !== 'Star') {
+        firstPlanetColor = Bodies.colorIdx ? Bodies.colorIdx[i] : Bodies.color[i];
+        break;
+      }
+    }
+    return { n: Bodies.n, firstPlanetColor };
+  };
+  const a = run(), b = run();
+  assert(a.n === b.n, 'richness: same seed -> identical system body count (' + a.n + ')');
+  assert(a.firstPlanetColor === b.firstPlanetColor && a.firstPlanetColor >= 0,
+    'richness: same seed -> identical first-planet colour (idx ' + a.firstPlanetColor + ')');
+  assert(a.n <= BUDGET.maxBodies, 'richness: system population within budget (' + a.n + ' <= ' + BUDGET.maxBodies + ')');
+
+  // Planet ARCHETYPE variety: across a system, the planet node summaries
+  // should expose distinct archetypes/colours (not all identical dots).
+  const root = Cosmos.create(7);
+  const sysNode = root.children()[7].children()[3];
+  const planets = sysNode.children();
+  const colours = new Set(), archs = new Set();
+  let radVisOk = true, summaryOk = true;
+  for (const p of planets) {
+    const sm = p.summary;
+    colours.add(sm.colorIdx);
+    if (sm.archetype) archs.add(sm.archetype);
+    if (!(sm.radVis > 0)) radVisOk = false;
+    if (typeof sm.hasRing !== 'boolean' || typeof sm.hasAtmo !== 'boolean') summaryOk = false;
+  }
+  assert(colours.size >= 2, 'richness: system shows >=2 distinct planet colours (' + colours.size + ' of ' + planets.length + ')');
+  assert(archs.size >= 1, 'richness: planet archetypes assigned (' + Array.from(archs).join(',') + ')');
+  assert(radVisOk, 'richness: every planet carries a positive visual radius (radVis)');
+  assert(summaryOk, 'richness: planet summary exposes hasRing/hasAtmo booleans');
+
+  // Budget invariant under the lower CPU budget for a giant-ish planet
+  // (rings + moons + atmosphere must respect maxBodies).
+  const TIGHT = { gpu: false, maxBodies: 1 << 17 };
+  let withinBudget = true;
+  for (const p of planets) {
+    Bodies.clear();
+    p.populate(TIGHT, Bodies);
+    if (Bodies.n > TIGHT.maxBodies) withinBudget = false;
+    // determinism of a single planet populate: re-run, same count.
+    const n1 = Bodies.n;
+    Bodies.clear();
+    p.populate(TIGHT, Bodies);
+    if (Bodies.n !== n1) withinBudget = false;
+  }
+  assert(withinBudget, 'richness: every planet populate stays within budget & is deterministic');
+}
+
 console.log(failed ? '\nSOME TESTS FAILED' : '\nALL TESTS PASSED');
 process.exit(failed ? 1 : 0);

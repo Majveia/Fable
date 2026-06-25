@@ -57,6 +57,68 @@
     [0.95, 0.45, 0.95], // 3 magenta — cargo
   ];
 
+  // Solid triangle builder: accumulates a triangle mesh (positions, per-vertex
+  // normals, per-triangle material colour) in SHIP SPACE. Layout:
+  //   tris  : Float32Array, 9 floats per triangle (3 verts x xyz)
+  //   norms : Float32Array, 9 floats per triangle (3 unit normals, one/vert)
+  //   triColor: Float32Array, 3 floats RGB per triangle
+  // Winding is CCW when viewed from OUTSIDE; the geometric normal is the
+  // normalized cross product of (b-a)x(c-a). Helpers below let callers either
+  // accept the flat face normal or supply smooth per-vertex normals.
+  function makeMesh() {
+    const pos = [];      // flat xyz, 9 per tri
+    const nrm = [];      // flat xyz, 9 per tri
+    const col = [];      // flat rgb, 3 per tri
+    function sub(a, b) { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+    function crs(u, v) {
+      return [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+    }
+    function unit(v) {
+      const l = Math.hypot(v[0], v[1], v[2]) || 1;
+      return [v[0]/l, v[1]/l, v[2]/l];
+    }
+    return {
+      // flat-shaded triangle: face normal from winding (a,b,c CCW from outside).
+      tri(a, b, c, color) {
+        const n = unit(crs(sub(b, a), sub(c, a)));
+        pos.push(a[0],a[1],a[2], b[0],b[1],b[2], c[0],c[1],c[2]);
+        nrm.push(n[0],n[1],n[2], n[0],n[1],n[2], n[0],n[1],n[2]);
+        col.push(color[0], color[1], color[2]);
+      },
+      // smooth triangle: caller supplies a per-vertex normal for each vertex.
+      striz(a, na, b, nb, c, nc, color) {
+        const ua = unit(na), ub = unit(nb), uc = unit(nc);
+        pos.push(a[0],a[1],a[2], b[0],b[1],b[2], c[0],c[1],c[2]);
+        nrm.push(ua[0],ua[1],ua[2], ub[0],ub[1],ub[2], uc[0],uc[1],uc[2]);
+        col.push(color[0], color[1], color[2]);
+      },
+      // quad a,b,c,d (CCW from outside) -> two flat triangles.
+      quad(a, b, c, d, color) {
+        this.tri(a, b, c, color);
+        this.tri(a, c, d, color);
+      },
+      // axis-aligned solid box from min/max corners (12 tris, outward normals).
+      box(min, max, color) {
+        const x0=min[0], y0=min[1], z0=min[2];
+        const x1=max[0], y1=max[1], z1=max[2];
+        const p = [
+          [x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0], // 0..3 back (-Z)
+          [x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1], // 4..7 front (+Z)
+        ];
+        // each face CCW seen from outside
+        this.quad(p[4],p[5],p[6],p[7], color); // +Z front
+        this.quad(p[1],p[0],p[3],p[2], color); // -Z back
+        this.quad(p[0],p[4],p[7],p[3], color); // -X left
+        this.quad(p[5],p[1],p[2],p[6], color); // +X right
+        this.quad(p[3],p[7],p[6],p[2], color); // +Y top
+        this.quad(p[0],p[1],p[5],p[4], color); // -Y bottom
+      },
+      get pos() { return pos; },
+      get nrm() { return nrm; },
+      get col() { return col; },
+    };
+  }
+
   // Small line builder: push a segment (two endpoints) into a flat list.
   function makeBuilder() {
     const out = [];
@@ -105,6 +167,31 @@
   function buildGeometry(seed) {
     const rng = makeRng((seed >>> 0) || 0xC0FFEE);
     const B = makeBuilder();
+    const M = makeMesh();
+
+    // ---- material palette (solid hull) ----
+    // Cool gunmetal greys/blues for the hull, a couple of warm accent panels,
+    // and warm amber for the engine area. RGB roughly in the renderer's HDR
+    // range (the shader applies Lambert + ambient + rim on top).
+    const MAT = {
+      hull:    [0.34, 0.40, 0.48],  // gunmetal blue-grey
+      hullDk:  [0.22, 0.27, 0.34],  // shadowed panels / belly
+      hullLt:  [0.46, 0.53, 0.61],  // upper deck highlight
+      accent:  [0.62, 0.34, 0.22],  // warm copper accent panel
+      wing:    [0.28, 0.33, 0.40],  // wing skin
+      wingEdge:[0.40, 0.45, 0.52],  // wing leading edge
+      fin:     [0.30, 0.36, 0.44],  // tail fin
+      engine:  [0.42, 0.30, 0.18],  // engine block (warm)
+      nozzle:  [1.10, 0.55, 0.16],  // glowing nozzle disk (amber, HDR)
+      canopy:  [0.18, 0.28, 0.40],  // dark blue canopy glass
+      // interior materials
+      floor:   [0.20, 0.23, 0.27],
+      console: [0.24, 0.30, 0.38],
+      seatMat: [0.30, 0.34, 0.40],
+      crate:   [0.38, 0.30, 0.20],
+      bulkhd:  [0.26, 0.31, 0.38],
+      readout: [0.16, 0.40, 0.46],
+    };
 
     // === HULL OUTLINE =====================================================
     // The body is a faceted "diamond" cross-section (top/bottom ridge + side
@@ -156,6 +243,85 @@
     B.seg([0, 0.55, 6.0], tip);
     B.seg([0, -0.35, 6.0], tip);
 
+    // === SOLID FUSELAGE ===================================================
+    // Close each pair of cross-section rings into quads (one per facet) so the
+    // hull is a watertight solid that matches the wireframe silhouette. Smooth
+    // normals: average the two adjacent facet normals at each ring vertex so
+    // the faceted hull still shades smoothly around its girth.
+    function ringFacetNormals(r) {
+      // outward normal of each edge facet of a ring (in the XY plane, z const).
+      const n = [];
+      for (let k = 0; k < r.length; k++) {
+        const a = r[k], b = r[(k + 1) % r.length];
+        // edge direction in XY; outward normal points away from axis (0,0).
+        let ex = b[0] - a[0], ey = b[1] - a[1];
+        let nx = ey, ny = -ex; // rotate -90 -> outward for CCW-from-front order
+        // ensure it points away from the centreline
+        const mx = (a[0] + b[0]) * 0.5, my = (a[1] + b[1]) * 0.5;
+        if (nx * mx + ny * my < 0) { nx = -nx; ny = -ny; }
+        const l = Math.hypot(nx, ny) || 1;
+        n.push([nx / l, ny / l, 0]);
+      }
+      return n;
+    }
+    // per-vertex smooth normal at ring vertex k = average of facet (k-1) and k.
+    function vertNormals(r, fn) {
+      const vn = [];
+      for (let k = 0; k < r.length; k++) {
+        const a = fn[(k - 1 + r.length) % r.length], b = fn[k];
+        vn.push([a[0] + b[0], a[1] + b[1], a[2] + b[2]]);
+      }
+      return vn;
+    }
+    const ringFN = rings.map(ringFacetNormals);
+    const ringVN = rings.map((r, i) => vertNormals(r, ringFN[i]));
+    for (let i = 0; i < rings.length - 1; i++) {
+      const a = rings[i], b = rings[i + 1];
+      const an = ringVN[i], bn = ringVN[i + 1];
+      const mat = (rings[i][0][2] < -3) ? MAT.hullDk : MAT.hull;
+      for (let k = 0; k < a.length; k++) {
+        const k2 = (k + 1) % a.length;
+        // quad a[k] -> a[k2] -> b[k2] -> b[k], wound CCW from outside (nose
+        // ring index i is the more +Z / forward ring).
+        M.striz(a[k2], an[k2], a[k], an[k], b[k], bn[k], mat);
+        M.striz(a[k2], an[k2], b[k], bn[k], b[k2], bn[k2], mat);
+      }
+    }
+    // accent panel: a warm copper band on the top-front facet (upper deck).
+    {
+      const a = rings[1], b = rings[2];
+      const an = ringVN[1], bn = ringVN[2];
+      // facet between top-right(1) and top-left(2)
+      M.striz(a[2], an[2], a[1], an[1], b[1], bn[1], MAT.accent);
+      M.striz(a[2], an[2], b[1], bn[1], b[2], bn[2], MAT.accent);
+    }
+
+    // === SOLID NOSE CONE =================================================
+    // Triangle fan from the forward ring (rings[0]) to the sharp tip.
+    {
+      const r = rings[0], rn = ringVN[0];
+      // tip normal points forward (+Z) and slightly up to match the spike.
+      const tn = [0, 0.18, 1];
+      for (let k = 0; k < r.length; k++) {
+        const k2 = (k + 1) % r.length;
+        // wound so outward normal faces away from the axis (CCW from outside)
+        M.striz(r[k], rn[k], r[k2], rn[k2], tip, tn, MAT.hullLt);
+      }
+    }
+
+    // === CANOPY GLASS ===================================================
+    // A dark blue faceted canopy over the cockpit shoulders for a real cockpit.
+    {
+      const zf = 6.0, zb = 3.4, hw = 0.95, hy = 1.05;
+      const fl = [-hw, 0.35, zf], fr = [hw, 0.35, zf];
+      const bl = [-hw, 0.45, zb], br = [hw, 0.45, zb];
+      const tf = [0, hy + 0.15, zf - 0.4], tb = [0, hy + 0.35, zb + 0.2];
+      M.tri(fl, fr, tf, MAT.canopy);          // front pane
+      M.quad(fr, br, tb, tf, MAT.canopy);     // right pane
+      M.quad(bl, fl, tf, tb, MAT.canopy);     // left pane
+      M.tri(bl, br, tb, MAT.canopy);          // back pane
+    }
+
     // === DELTA WINGS ======================================================
     // Swept-back delta wings springing from the widest body, raking down/out
     // toward -Z. Mirror across X. Each wing is a quad with a leading edge.
@@ -172,6 +338,31 @@
       const pod = [s * (HALF_W + 0.15), -0.55, -1.2];
       B.seg(tip_f, pod);
       B.seg(tip_b, pod);
+
+      // --- SOLID WING: a thin slab (top + bottom + leading/trailing edges). ---
+      const TH = 0.16; // half-thickness of the wing slab
+      // top surface verts (lifted +Y), bottom (-Y).
+      const rf_t = [root_f[0], root_f[1] + TH, root_f[2]];
+      const rb_t = [root_b[0], root_b[1] + TH, root_b[2]];
+      const tf_t = [tip_f[0],  tip_f[1]  + TH, tip_f[2]];
+      const tb_t = [tip_b[0],  tip_b[1]  + TH, tip_b[2]];
+      const rf_b = [root_f[0], root_f[1] - TH, root_f[2]];
+      const rb_b = [root_b[0], root_b[1] - TH, root_b[2]];
+      const tf_b = [tip_f[0],  tip_f[1]  - TH, tip_f[2]];
+      const tb_b = [tip_b[0],  tip_b[1]  - TH, tip_b[2]];
+      if (s > 0) {
+        M.quad(rf_t, tf_t, tb_t, rb_t, MAT.wing);   // top (CCW from +Y)
+        M.quad(rf_b, rb_b, tb_b, tf_b, MAT.wing);   // bottom
+        M.quad(rf_b, tf_b, tf_t, rf_t, MAT.wingEdge); // leading edge
+        M.quad(rb_t, tb_t, tb_b, rb_b, MAT.wingEdge); // trailing edge
+        M.quad(tf_t, tf_b, tb_b, tb_t, MAT.wingEdge); // wingtip
+      } else {
+        M.quad(rb_t, tb_t, tf_t, rf_t, MAT.wing);   // top (mirror winding)
+        M.quad(rb_b, rf_b, tf_b, tb_b, MAT.wing);   // bottom
+        M.quad(rf_t, tf_t, tf_b, rf_b, MAT.wingEdge); // leading edge
+        M.quad(rb_b, tb_b, tb_t, rb_t, MAT.wingEdge); // trailing edge
+        M.quad(tb_t, tb_b, tf_b, tf_t, MAT.wingEdge); // wingtip
+      }
     }
     wing(+1); wing(-1);
 
@@ -194,12 +385,37 @@
       const top_b  = [s * 1.05, 2.7, -6.2];
       const top_f  = [s * 1.0, 2.1, -4.4];
       B.loop([base_f, top_f, top_b, base_b]);
+
+      // --- SOLID FIN: a thin vertical slab (two faces + edges). ---
+      const TH = 0.10;
+      const bf_o = [base_f[0] + s*TH, base_f[1], base_f[2]];
+      const bb_o = [base_b[0] + s*TH, base_b[1], base_b[2]];
+      const tb_o = [top_b[0]  + s*TH, top_b[1],  top_b[2]];
+      const tf_o = [top_f[0]  + s*TH, top_f[1],  top_f[2]];
+      const bf_i = [base_f[0] - s*TH, base_f[1], base_f[2]];
+      const bb_i = [base_b[0] - s*TH, base_b[1], base_b[2]];
+      const tb_i = [top_b[0]  - s*TH, top_b[1],  top_b[2]];
+      const tf_i = [top_f[0]  - s*TH, top_f[1],  top_f[2]];
+      if (s > 0) {
+        M.quad(bf_o, tf_o, tb_o, bb_o, MAT.fin);   // outer face (+X)
+        M.quad(bf_i, bb_i, tb_i, tf_i, MAT.fin);   // inner face
+      } else {
+        M.quad(bb_o, tb_o, tf_o, bf_o, MAT.fin);
+        M.quad(bb_i, bf_i, tf_i, tb_i, MAT.fin);
+      }
+      // leading + trailing edges (same winding both sides)
+      M.quad(bf_i, tf_i, tf_o, bf_o, MAT.wingEdge); // leading
+      M.quad(bb_o, tb_o, tb_i, bb_i, MAT.wingEdge); // trailing
+      M.quad(tf_o, tf_i, tb_i, tb_o, MAT.wingEdge); // top cap
     }
     fin(+1); fin(-1);
 
     // === ENGINE BLOCK (-Z) ================================================
     // A boxy thruster cluster at the stern with twin nozzle rings.
     B.box([-1.7, -1.2, TAIL], [1.7, 1.2, -5.4]);
+    // --- SOLID ENGINE BLOCK (warm). ---
+    M.box([-1.7, -1.2, TAIL], [1.7, 1.2, -5.4], MAT.engine);
+
     // nozzle rings (octagons) on the back face, glowing thruster mouths.
     function nozzle(cx, cy) {
       const r = 0.7, z = TAIL - 0.0;
@@ -213,6 +429,19 @@
       const inner = pts.map(p => [cx + (p[0] - cx) * 0.5, cy + (p[1] - cy) * 0.5, z + 0.6]);
       B.loop(inner);
       for (let k = 0; k < 8; k++) B.seg(pts[k], inner[k]);
+
+      // --- SOLID GLOWING NOZZLE: cone from the outer ring to a recessed,
+      // brightly lit inner disk so the thruster reads as a glowing mouth. ---
+      const centre = [cx, cy, z + 0.55];
+      const nBack = [0, 0, -1]; // faces aft (-Z)
+      for (let k = 0; k < 8; k++) {
+        const a = pts[k], b = pts[(k + 1) % 8];
+        const ia = inner[k], ib = inner[(k + 1) % 8];
+        // cowl wall (outer ring -> inner ring), warm engine material
+        M.quad(b, a, ia, ib, MAT.engine);
+        // glowing inner disk fan toward the recessed centre
+        M.tri(ib, ia, centre, MAT.nozzle);
+      }
     }
     nozzle(-0.85, -0.1);
     nozzle( 0.85, -0.1);
@@ -266,6 +495,93 @@
     B.box([ 0.5, FLOOR, -4.0], [ 1.4, FLOOR + 0.7, -3.1]);
     B.box([ 0.4, FLOOR, -2.3], [ 1.3, FLOOR + 1.0, -1.4]);
 
+    // === SOLID INTERIOR DETAIL (walkable) =================================
+    // Solid floor decks under each room so the avatar stands on a real surface,
+    // plus a console bank, a seat, doorway/bulkhead frames, cargo crates and an
+    // engine-room readout. Floor grating lines (wireframe) layer on top.
+    const DECK = 0.08; // floor slab thickness
+
+    // floor decks (cockpit / corridor / hold).
+    M.box([-cpHW, FLOOR - DECK, cpZ0], [cpHW, FLOOR, cpZ1], MAT.floor);
+    M.box([-coHW, FLOOR - DECK, coZ0], [coHW, FLOOR, coZ1], MAT.floor);
+    M.box([-chHW, FLOOR - DECK, chZ0], [chHW, FLOOR, chZ1], MAT.floor);
+
+    // floor grating lines (accent) running along each deck.
+    for (let g = -2; g <= 2; g++) {
+      const x = g * 0.4;
+      if (Math.abs(x) <= cpHW) B.seg([x, FLOOR + 0.002, cpZ0], [x, FLOOR + 0.002, cpZ1]);
+    }
+    for (let z = -4; z <= 6; z++) {
+      if (z >= chZ0 && z <= cpZ1) {
+        const hw = z >= cpZ0 ? cpHW : (z >= coZ0 ? coHW : chHW);
+        B.seg([-hw, FLOOR + 0.002, z], [hw, FLOOR + 0.002, z]);
+      }
+    }
+
+    // --- COCKPIT CONSOLE BANK: an angled panel sweep in front of the seat. ---
+    {
+      const z0 = 5.2, z1 = 6.0, hw = 1.05;
+      const base = FLOOR;
+      const top = FLOOR + 0.85;
+      // angled top panel (tilts back toward the pilot, faces up+aft)
+      const fl = [-hw, base + 0.35, z1], fr = [hw, base + 0.35, z1];
+      const bl = [-hw, top, z0],         br = [hw, top, z0];
+      M.box([-hw, base, z1 - 0.12], [hw, base + 0.4, z1], MAT.console); // lower lip
+      M.quad(fl, fr, br, bl, MAT.console);               // angled face
+      // glowing accent seams across the console face (running lights)
+      for (let k = 0; k <= 3; k++) {
+        const t = k / 3;
+        const lx = -hw + 0.1, rx = hw - 0.1;
+        const ay = base + 0.35 + (top - (base + 0.35)) * t;
+        const az = z1 + (z0 - z1) * t;
+        B.seg([lx, ay + 0.01, az], [rx, ay + 0.01, az]);
+      }
+      // two side stalk panels angled inward
+      M.box([-hw - 0.05, base, z0], [-hw + 0.18, top, z0 + 0.5], MAT.console);
+      M.box([ hw - 0.18, base, z0], [ hw + 0.05, top, z0 + 0.5], MAT.console);
+    }
+
+    // --- PILOT SEAT: a proper seat shape (base + cushion + back + headrest). ---
+    {
+      const sx = 0.32, sz = 4.5, sy = FLOOR;
+      M.box([-sx, sy, sz - 0.35], [sx, sy + 0.18, sz + 0.35], MAT.seatMat);          // base
+      M.box([-sx, sy + 0.18, sz - 0.05], [sx, sy + 0.30, sz + 0.35], MAT.seatMat);   // cushion
+      M.box([-sx, sy + 0.18, sz - 0.40], [sx, sy + 0.95, sz - 0.18], MAT.seatMat);   // backrest
+      M.box([-0.22, sy + 0.95, sz - 0.40], [0.22, sy + 1.18, sz - 0.20], MAT.seatMat); // headrest
+      // seat frame accent edges
+      B.box([-sx, sy + 0.18, sz - 0.40], [sx, sy + 0.95, sz - 0.18]);
+    }
+
+    // --- BULKHEAD / DOORWAY FRAMES between rooms (cockpit|corridor|hold). ---
+    function doorway(z, hw) {
+      const jamb = 0.12, h = CEIL - 0.05;
+      // left + right jambs and a lintel as solid posts
+      M.box([-hw, FLOOR, z - jamb*0.5], [-hw + jamb, h, z + jamb*0.5], MAT.bulkhd);
+      M.box([ hw - jamb, FLOOR, z - jamb*0.5], [ hw, h, z + jamb*0.5], MAT.bulkhd);
+      M.box([-hw, h - jamb, z - jamb*0.5], [ hw, h, z + jamb*0.5], MAT.bulkhd);
+      // glowing frame outline (accent)
+      B.loop([[-hw, FLOOR, z], [hw, FLOOR, z], [hw, h, z], [-hw, h, z]]);
+    }
+    doorway(cpZ0, coHW);   // cockpit <-> corridor
+    doorway(coZ0, coHW);   // corridor <-> hold
+
+    // --- SOLID CARGO CRATES (replace the wireframe-only crates visually). ---
+    M.box([-1.4, FLOOR, -4.2], [-0.4, FLOOR + 0.9, -3.2], MAT.crate);
+    M.box([ 0.5, FLOOR, -4.0], [ 1.4, FLOOR + 0.7, -3.1], MAT.crate);
+    M.box([ 0.4, FLOOR, -2.3], [ 1.3, FLOOR + 1.0, -1.4], MAT.crate);
+
+    // --- ENGINE-ROOM READOUT: a glowing panel on the aft bulkhead. ---
+    {
+      const z = chZ0 + 0.05, hw = 0.8, y0 = FLOOR + 0.5, y1 = FLOOR + 1.1;
+      // panel faces forward (+Z) into the hold
+      M.quad([-hw, y0, z], [hw, y0, z], [hw, y1, z], [-hw, y1, z], MAT.readout);
+      // scanline accents on the readout
+      for (let k = 1; k <= 3; k++) {
+        const y = y0 + (y1 - y0) * (k / 4);
+        B.seg([-hw + 0.05, y, z + 0.01], [hw - 0.05, y, z + 0.01]);
+      }
+    }
+
     // === WALKABLE BOUNDS (axis-aligned) ===================================
     // Three slightly inset volumes the avatar can occupy; their union spans
     // cockpit + corridor + hold. Inset from the frame so the avatar's eye
@@ -306,8 +622,14 @@
       eye: [seatPos[0], seatPos[1] + 0.65, seatPos[2]],
     };
 
+    // Expand per-triangle material colours to a flat RGB-per-triangle array.
+    const triColor = Float32Array.from(M.col);
+
     return {
       lines: Float32Array.from(B.array),
+      tris: Float32Array.from(M.pos),     // 9 floats/tri: 3 verts x xyz
+      norms: Float32Array.from(M.nrm),    // 9 floats/tri: 3 unit normals
+      triColor,                            // 3 floats/tri: material RGB
       nodes,
       seat,
       bounds,
@@ -323,6 +645,9 @@
 
     // populated by build()
     lines: null,
+    tris: null,        // Float32Array, 9 floats/tri (3 verts x xyz), SHIP SPACE
+    norms: null,       // Float32Array, 9 floats/tri (3 per-vertex unit normals)
+    triColor: null,    // Float32Array, 3 floats/tri (per-triangle material RGB)
     nodes: null,
     seat: null,
     bounds: null,
@@ -337,6 +662,9 @@
       if (this.lines && this._seed === s) return this;
       const g = buildGeometry(s);
       this.lines = g.lines;
+      this.tris = g.tris;
+      this.norms = g.norms;
+      this.triColor = g.triColor;
       this.nodes = g.nodes;
       this.seat = g.seat;
       this.bounds = g.bounds;

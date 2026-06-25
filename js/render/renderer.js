@@ -332,6 +332,54 @@ void main() {
   outColor = vec4(col * a, a);
 }`;
 
+  /* ---- ship overlay SOLID mesh pass (v9 SHIPWRIGHT) ----
+     A shaded, depth-tested triangle pass drawn BEFORE the wireframe lines so
+     the hull reads as a real, self-occluding solid rather than a flat cyan
+     cage. Lambert diffuse + ambient + a subtle rim/fresnel term. Runs on the
+     default framebuffer (now created with depth:true) with depth write+test
+     and blending OFF. No overlay.tris -> this whole pass is a clean no-op. */
+  const OVL_MESH_VERT_SRC = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 a_pos;    // node-local vertex position
+layout(location = 1) in vec3 a_norm;   // node-local unit normal
+layout(location = 2) in vec3 a_color;  // per-triangle material RGB
+uniform mat4 u_viewProj;
+out vec3 v_norm;
+out vec3 v_color;
+out vec3 v_viewDir;
+void main() {
+  vec4 clip = u_viewProj * vec4(a_pos, 1.0);
+  gl_Position = clip;
+  v_norm = a_norm;
+  v_color = a_color;
+  // approximate view direction in node-local space: the overlay is drawn in
+  // the active node's local frame where the camera sits near the origin, so
+  // -a_pos points roughly toward the eye. Good enough for a rim term.
+  v_viewDir = -a_pos;
+}`;
+
+  const OVL_MESH_FRAG_SRC = `#version 300 es
+precision highp float;
+in vec3 v_norm;
+in vec3 v_color;
+in vec3 v_viewDir;
+uniform vec3 u_lightDir;   // node-local, points TOWARD the light (normalized)
+out vec4 outColor;
+void main() {
+  vec3 N = normalize(v_norm);
+  vec3 L = normalize(u_lightDir);
+  vec3 V = normalize(v_viewDir);
+  // two-sided shading so back-facing winding still lights (robustness).
+  float ndl = dot(N, L);
+  float diff = max(abs(ndl) * 0.85 + 0.15, 0.0); // soft wrap-ish diffuse
+  float ambient = 0.28;
+  // subtle rim / fresnel to catch the silhouette edges.
+  float rim = pow(1.0 - clamp(abs(dot(N, V)), 0.0, 1.0), 3.0);
+  vec3 base = v_color * (ambient + diff * 0.95);
+  vec3 col = base + rim * 0.35 * (v_color * 0.5 + vec3(0.25, 0.35, 0.45));
+  outColor = vec4(col, 1.0);
+}`;
+
   function compile(gl, type, src) {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, src);
@@ -358,9 +406,9 @@ void main() {
   // ---------------------------------------------------------------- state
   let gl = null, canvas = null;
   let progA = null, progT = null, fadeProg = null, presentProg = null;
-  let ovlLineProg = null, ovlPtProg = null;
+  let ovlLineProg = null, ovlPtProg = null, ovlMeshProg = null;
   const uniA = {}, uniT = {}, uniF = {}, uniP = {};
-  const uniOL = {}, uniOP = {};
+  const uniOL = {}, uniOP = {}, uniOM = {};
   let maxPointSize = 64;
   let cssW = 1, cssH = 1, dprV = 1;
 
@@ -371,6 +419,9 @@ void main() {
   let ovlLineVao = null, ovlLineVbo = null, ovlLineCapFloats = 0;
   let ovlPtVao = null, ovlPtVbo = null, ovlPtCapFloats = 0;
   let ovlPtScratch = new Float32Array(0);
+  // solid hull mesh: interleaved [pos.xyz, norm.xyz, color.rgb] = 9 floats/vert
+  let ovlMeshVao = null, ovlMeshVbo = null, ovlMeshCapFloats = 0;
+  let ovlMeshScratch = new Float32Array(0);
 
   let scratch = new Float32Array(0);     // all bodies, additive pass
   let opqScratch = new Float32Array(0);  // planets + BHs, sorted
@@ -469,6 +520,22 @@ void main() {
     gl.bindVertexArray(null);
   }
 
+  function ensureOvlMeshCapacity(floats) {
+    if (floats <= ovlMeshCapFloats) return;
+    ovlMeshCapFloats = Math.max(floats, ovlMeshCapFloats * 2, 4096 * 9);
+    gl.bindVertexArray(ovlMeshVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, ovlMeshVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, ovlMeshCapFloats * 4, gl.DYNAMIC_DRAW);
+    const stride = 9 * 4;                  // pos.xyz, norm.xyz, color.rgb
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, stride, 24);
+    gl.bindVertexArray(null);
+  }
+
   /* Draw the ship overlay onto the default framebuffer, AFTER PostFX
      present. Additive glowing GL_LINES (wireframe) + additive point
      sprites (markers), in node-local space via the scene viewProj. */
@@ -476,15 +543,71 @@ void main() {
     if (!overlay || !ovlLineProg) return;
     const lines = overlay.lines;
     const points = overlay.points;
+    const tris = overlay.tris;
+    const norms = overlay.norms;
+    const triColor = overlay.triColor;
     const haveLines = lines && lines.length >= 6;
     const havePoints = points && points.length > 0;
-    if (!haveLines && !havePoints) return;
+    const haveMesh = ovlMeshProg && tris && tris.length >= 9 &&
+                     norms && norms.length === tris.length &&
+                     triColor && triColor.length * 3 === tris.length;
+    if (!haveLines && !havePoints && !haveMesh) return;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
+
+    // ---- SOLID HULL PASS (opaque, depth write+test) ----
+    // Runs first so the shaded triangles self-occlude; then the wireframe
+    // accent edges and markers are drawn depth-tested but additive on top.
+    if (haveMesh) {
+      const nVerts = tris.length / 3;          // 3 floats per vertex position
+      const nTri = tris.length / 9;            // 9 floats per triangle
+      const floats = nVerts * 9;               // interleaved pos+norm+color
+      if (ovlMeshScratch.length < floats) {
+        ovlMeshScratch = new Float32Array(Math.max(floats, ovlMeshScratch.length * 2));
+      }
+      const S = ovlMeshScratch;
+      // interleave: for each vertex v, [pos.xyz, norm.xyz, triColor.rgb].
+      for (let t = 0; t < nTri; t++) {
+        const cr = triColor[t * 3], cg = triColor[t * 3 + 1], cb = triColor[t * 3 + 2];
+        for (let j = 0; j < 3; j++) {
+          const vi = t * 3 + j;                // vertex index
+          const pi = vi * 3;                   // base into tris/norms
+          const oi = vi * 9;                   // base into interleaved scratch
+          S[oi]     = tris[pi];     S[oi + 1] = tris[pi + 1]; S[oi + 2] = tris[pi + 2];
+          S[oi + 3] = norms[pi];    S[oi + 4] = norms[pi + 1]; S[oi + 5] = norms[pi + 2];
+          S[oi + 6] = cr;           S[oi + 7] = cg;           S[oi + 8] = cb;
+        }
+      }
+      const ld = overlay.lightDir || [0.4, 0.8, 0.3];
+      ensureOvlMeshCapacity(floats);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(true);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      gl.disable(gl.BLEND);
+      gl.useProgram(ovlMeshProg);
+      gl.uniformMatrix4fv(uniOM.viewProj, false, viewProj);
+      gl.uniform3f(uniOM.lightDir, ld[0], ld[1], ld[2]);
+      gl.bindVertexArray(ovlMeshVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, ovlMeshVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, S, 0, floats);
+      gl.drawArrays(gl.TRIANGLES, 0, nVerts);
+    }
+
+    // ---- additive accent / marker pass ----
+    // Depth TEST on (so glowing trim sits on the hull surface, hidden behind
+    // it where occluded) but depth WRITE off, additive blend. When there is no
+    // solid mesh, depth test is disabled so behaviour is byte-for-byte the old
+    // additive-only overlay.
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);          // additive glow
-    gl.disable(gl.DEPTH_TEST);
+    if (haveMesh) {
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+    } else {
+      gl.disable(gl.DEPTH_TEST);
+    }
     gl.depthMask(false);
 
     // ---- wireframe lines ----
@@ -531,6 +654,9 @@ void main() {
 
     gl.bindVertexArray(null);
     gl.depthMask(true);
+    // leave depth test disabled (matches the renderer's default GL state after
+    // every other pass, which manages DEPTH_TEST locally).
+    gl.disable(gl.DEPTH_TEST);
   }
 
   /* ~3000 static far stars on a sphere — drawn first every frame so
@@ -753,7 +879,7 @@ void main() {
           premultipliedAlpha: true,
           preserveDrawingBuffer: false,  // trails now live in the scene FBO
           antialias: false,
-          depth: false,                  // depth is an FBO attachment
+          depth: true,                   // default FB depth for the solid ship overlay pass
           stencil: false,
         });
       } catch (e) {
@@ -768,6 +894,7 @@ void main() {
         presentProg = link(gl, FADE_VERT_SRC, PRESENT_FRAG_SRC);
         ovlLineProg = link(gl, OVL_LINE_VERT_SRC, OVL_LINE_FRAG_SRC);
         ovlPtProg = link(gl, OVL_PT_VERT_SRC, OVL_PT_FRAG_SRC);
+        ovlMeshProg = link(gl, OVL_MESH_VERT_SRC, OVL_MESH_FRAG_SRC);
       } catch (e) {
         return null;
       }
@@ -784,6 +911,8 @@ void main() {
       uniOP.palette = gl.getUniformLocation(ovlPtProg, 'u_palette');
       uniOP.dpr = gl.getUniformLocation(ovlPtProg, 'u_dpr');
       uniOP.maxPointSize = gl.getUniformLocation(ovlPtProg, 'u_maxPointSize');
+      uniOM.viewProj = gl.getUniformLocation(ovlMeshProg, 'u_viewProj');
+      uniOM.lightDir = gl.getUniformLocation(ovlMeshProg, 'u_lightDir');
 
       const range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
       maxPointSize = (range && range[1]) ? range[1] : 64;
@@ -812,10 +941,12 @@ void main() {
       texVao = gl.createVertexArray(); texVbo = gl.createBuffer();
       ovlLineVao = gl.createVertexArray(); ovlLineVbo = gl.createBuffer();
       ovlPtVao = gl.createVertexArray(); ovlPtVbo = gl.createBuffer();
+      ovlMeshVao = gl.createVertexArray(); ovlMeshVbo = gl.createBuffer();
       ensureDynCapacity(1);
       ensureOpqCapacity(1);
       ensureOvlLineCapacity(1);
       ensureOvlPtCapacity(1);
+      ensureOvlMeshCapacity(1);
       buildBackground();
 
       gl.disable(gl.DEPTH_TEST);
