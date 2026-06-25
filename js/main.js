@@ -181,6 +181,7 @@ function commitToEngine() {
 
 function loadScenario(i, seed) {
   universeMode = false;
+  surfaceMode = false; surface = null;
   $('breadcrumb').textContent = '';
   scenarioIdx = (i + Scenarios.list.length) % Scenarios.list.length;
   const sc = Scenarios.list[scenarioIdx];
@@ -255,6 +256,9 @@ let camMode = 'chase';            // FLY camera: chase | cockpit | orbit
 let walkMode = false;             // on foot inside the ship
 let walkView = 'fp';              // walk camera: fp | tp
 let overlay = null;               // ship wireframe overlay (node-local), per frame
+let surfaceMode = false;          // landed on / flying a planet surface
+let surface = null;               // Surface descriptor (mesh/sky/heightAt/spawn/...)
+let surfView = 'chase';           // surface camera: chase | cockpit
 let scanHeld = false;
 let pois = [];
 let lmList = [];
@@ -400,6 +404,9 @@ function shipBasis() {
   return { F, R: R2, U: U2 };
 }
 function shipWorldLen() {
+  // On a planet surface the ship is a fixed real-world size against the
+  // terrain (extent is ~1200), not scaled by the cosmic LOD extent.
+  if (surfaceMode) return 24;
   const vr = (Navigator.active && (Navigator.active.viewRadius || Navigator.active.radius)) || 1000;
   return Math.max(8, Math.min(vr * 0.03, 300));
 }
@@ -461,6 +468,69 @@ function buildOverlay() {
   return overlay;
 }
 
+/* ============================================================
+   PLANET-SURFACE LANDINGS. From orbit at a planet node, press L to
+   descend: generate the surface (deterministic from the planet's
+   archetype + id), drop the ship in under gravity, and render the
+   terrain scene. Press L again to take off back into orbit.
+   ============================================================ */
+function landOnPlanet() {
+  if (!universeMode || surfaceMode) return;
+  if (!globalThis.Surface || !globalThis.Ship) return;
+  const node = Navigator.active;
+  if (!node || node.kind !== 'planet') {
+    if (globalThis.HUD) HUD.toast('NO PLANET TO LAND ON — DIVE TO A PLANET FIRST', '#ff4fd8');
+    return;
+  }
+  const sm = node.summary || {};
+  surface = Surface.generate({
+    archetype: sm.archetype || 'rocky',
+    seed: node.id || 'surf',
+    radius: node.radius || sm.radVis || 0,
+    colorIdx: (sm.colorIdx != null ? sm.colorIdx : 5),
+  });
+  if (walkMode) { walkMode = false; }
+  surfaceMode = true;
+  surfView = 'chase';
+  Ship.surfaceReset({ spawn: surface.spawn, gravity: 12, extent: surface.extent, clearance: 5 });
+  buildOverlay();
+  const g = Ship.surfaceCameraGoal(surfView, surface.heightAt);
+  if (g) { Camera3D.setGoal(g); Camera3D.snap(); }
+  if (globalThis.HUD) HUD.toast('LANDING · ' + (surface.archetype || '').toUpperCase() +
+    ' SURFACE', '#ffb347');
+  if (globalThis.Score) Score.discovery();
+}
+
+function leaveSurface() {
+  if (!surfaceMode) return;
+  surfaceMode = false;
+  surface = null;
+  // Re-establish orbit at the same planet node and snap the chase cam on.
+  spawnShip(Navigator.active);
+  buildOverlay();
+  const g0 = Ship.cameraGoal(camMode);
+  if (g0) { Camera3D.setGoal(g0); Camera3D.snap(); }
+  if (globalThis.HUD) HUD.toast('LIFTOFF · BACK IN ORBIT', '#37e6ff');
+  if (globalThis.Score) Score.bounty();
+}
+
+// Minimal cockpit readout while on a planet surface: speed, altitude,
+// heading and the camera mode (the full POI/scan HUD is orbit-only).
+function surfaceHUD(input) {
+  if (!globalThis.HUD || !globalThis.Ship) return;
+  const s = Ship.state;
+  HUD.update({
+    speed: s.speed,
+    throttle: input.thrust > 0 ? input.thrust : 0,
+    boost: !!input.boost,
+    breadcrumb: 'SURFACE · ' + (surface ? surface.archetype.toUpperCase() : '') +
+      ' · ALT ' + Math.max(0, Math.round(s.altitude)) + (s.grounded ? ' · LANDED' : ''),
+    coords: s.pos, heading: [s.yaw, s.pitch], fps: fpsSmooth,
+    mode: 'surface ' + surfView,
+    scanProgress: 0, target: null, bounty: globalThis.Drifter ? Drifter.activeBounty : null,
+  });
+}
+
 // Place the camera so its eye sits at E (node-local) looking along unit L.
 // eye = target + dist*(cp*sy, sp, cp*cy); look = -that. So target = E + L*D.
 function aimCamera(E, L, D) {
@@ -497,6 +567,7 @@ function toggleWalk() {
 
 function enterUniverse(record) {
   universeMode = true;
+  surfaceMode = false; surface = null;
   const seed = record ? record.seed : ((Math.random() * 2 ** 31) | 0) >>> 0;
   Cosmos.create(seed);
   let agedMsg = '';
@@ -692,8 +763,15 @@ window.addEventListener('keydown', (e) => {
     case 'x': case 'X':
       if (universeMode) toggleWalk();      // enter / leave the ship on foot
       break;
+    case 'l': case 'L':
+      if (surfaceMode) leaveSurface();
+      else if (universeMode) landOnPlanet();
+      break;
     case 'v': case 'V':
-      if (universeMode) {
+      if (surfaceMode) {
+        surfView = surfView === 'cockpit' ? 'chase' : 'cockpit';
+        toast('VIEW · ' + (surfView === 'cockpit' ? 'FIRST PERSON' : 'THIRD PERSON'));
+      } else if (universeMode) {
         if (walkMode) { walkView = walkView === 'fp' ? 'tp' : 'fp'; toast('VIEW · ' + walkView.toUpperCase()); }
         else { camMode = camMode === 'cockpit' ? 'chase' : 'cockpit';
           toast('VIEW · ' + (camMode === 'cockpit' ? 'FIRST PERSON' : 'THIRD PERSON')); }
@@ -732,6 +810,7 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'r':
       if (universeMode) {
+        surfaceMode = false; surface = null;
         Navigator.focusNode(Cosmos.root); loadCosmosNode(Cosmos.root, true);
         spawnShip(Cosmos.root); rebuildPOIs(Cosmos.root);
       } else loadScenario(scenarioIdx);
@@ -853,7 +932,20 @@ function frame(now) {
   // DRIFTER: pilot the ship; the camera follows it; the Navigator streams
   // the universe (LOD + floating origin) around the ship's position; on a
   // level change repopulate, respawn the ship, and rebuild this node's POIs.
-  if (universeMode && globalThis.Navigator && Navigator.active) {
+  if (surfaceMode && globalThis.Ship && surface) {
+    // ON A PLANET SURFACE: gravity flight + ground collision; the camera
+    // chases the lander over the terrain; the Navigator/LOD is paused.
+    dtSecLast = dtMs / 1000;
+    const input = buildShipInput();
+    if (!engine.cfg.paused) {
+      Ship.surfaceUpdate(dtSecLast, input, surface.heightAt);
+      const g = Ship.surfaceCameraGoal(surfView, surface.heightAt);
+      if (g) Camera3D.setGoal(g);
+      if (globalThis.Score) Score.setThrust(input.thrust > 0 ? (input.boost ? 1 : 0.6) : 0);
+    }
+    buildOverlay();
+    surfaceHUD(input);
+  } else if (universeMode && globalThis.Navigator && Navigator.active) {
     dtSecLast = dtMs / 1000;
     const input = buildShipInput();
     if (walkMode && globalThis.Avatar) {
@@ -942,7 +1034,10 @@ function frame(now) {
     lightPos, trails, timeMs: now,
     blackHoles: engine.blackHoleList(),
     attribsVersion: engine.attribsVersion || 0,
-    overlay: (universeMode && overlay) ? overlay : null,   // ship wireframe
+    overlay: ((surfaceMode || universeMode) && overlay) ? overlay : null,   // solid ship
+    surface: (surfaceMode && surface) ? {                  // planet-surface scene
+      mesh: surface.mesh, markers: surface.markers, sky: surface.sky,
+    } : null,
   });
   requestAnimationFrame(frame);
 }

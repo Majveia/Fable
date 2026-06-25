@@ -222,6 +222,206 @@
         pitch: camPitch,
       };
     },
+
+    /* ========================================================
+       SURFACE (landed / low-flight) MODE
+       --------------------------------------------------------
+       A separate integrator used while the player is LANDED on a
+       planet. It shares the SAME state object + orientation/forward
+       convention as the space model, but swaps the inertial-damper
+       Newtonian feel for a gravity-bound hovering-lander feel:
+
+         * SURFACE SPACE frame: +Y is UP (opposite gravity); the
+           terrain is centred at x=z=0 and spans +/- extent.
+         * Gravity pulls in -Y every frame.
+         * Thrust pushes ALONG the nose, so pitching up + thrust
+           lifts you (a lander climbs by tilting back and burning).
+         * Mild linear drag keeps it controllable (no infinite
+           coasting; lets you settle to a hover/stop).
+         * Ground collision via heightAt(x,z): pos.y is never below
+           heightAt + clearance; downward velocity is killed (no
+           bounce) on contact; a soft touchdown sets grounded.
+         * X/Z are clamped to +/- extent so you can't leave the map.
+       ======================================================== */
+
+    // --- surface tunables ---
+    _surfGravity: 12,     // accel in -Y (u/s^2); overridable via surfaceReset
+    _surfExtent: 1200,    // half-width clamp for X/Z
+    _surfClear: 6,        // ride height above terrain (ship sits at h+clearance)
+
+    /* surfaceReset({ spawn:{pos,yaw}, gravity, extent, clearance })
+       Drop the ship at the spawn point above the terrain, at rest.
+       Resets pitch/roll to level and velocity to zero. Stores the
+       gravity magnitude, the X/Z extent clamp and the ground
+       clearance for surfaceUpdate to use. Returns state. */
+    surfaceReset(opts) {
+      opts = opts || {};
+      const spawn = opts.spawn || {};
+      const p = spawn.pos || [0, 0, 0];
+      const s = this.state;
+      s.pos = [+p[0] || 0, +p[1] || 0, +p[2] || 0];
+      s.vel = [0, 0, 0];
+      s.yaw = wrap(+spawn.yaw || 0);
+      s.pitch = 0;
+      s.roll = 0;
+      s.throttle = 0;
+      s.speed = 0;
+      s.grounded = false;
+      s.altitude = 0;
+      this._surfGravity = (opts.gravity > 0 && isFinite(opts.gravity)) ? +opts.gravity : 12;
+      this._surfExtent = (opts.extent > 0 && isFinite(opts.extent)) ? +opts.extent : 1200;
+      this._surfClear = (opts.clearance > 0 && isFinite(opts.clearance)) ? +opts.clearance : 6;
+      return s;
+    },
+
+    /* surfaceUpdate(dtSec, input, heightAt)
+       input = { thrust, pitch, yaw, roll, boost } (-1..1; boost bool),
+       heightAt(x,z) -> terrain surface height (finite).
+       Integrates orientation from rate inputs, applies gravity in -Y,
+       thrust along the nose, mild drag, then position; clamps X/Z to
+       the extent and resolves ground collision. Sets state.grounded
+       and state.altitude. Returns state. */
+    surfaceUpdate(dtSec, input, heightAt) {
+      const dt = (dtSec > 0 && isFinite(dtSec)) ? Math.min(dtSec, 0.1) : 0;
+      input = input || {};
+      const s = this.state;
+      const ext = this._surfExtent;
+      const clearance = this._surfClear;
+      const ht = (typeof heightAt === 'function') ? heightAt : function () { return 0; };
+
+      // ---- 1) Orientation from rate inputs (same handling as update) ----
+      const yIn = clamp(+input.yaw   || 0, -1, 1);
+      const pIn = clamp(+input.pitch || 0, -1, 1);
+      const rIn = clamp(+input.roll  || 0, -1, 1);
+      s.yaw   = wrap(s.yaw + yIn * YAW_RATE * dt);
+      s.pitch = clamp(s.pitch + pIn * PITCH_RATE * dt, -PITCH_LIMIT, PITCH_LIMIT);
+      s.roll  = wrap(s.roll + rIn * ROLL_RATE * dt);
+
+      // ---- 2) Forward from the freshly integrated angles ----
+      const F = forwardFrom(s.yaw, s.pitch);
+
+      // ---- 3) Gravity (-Y) + thrust along nose (boost scales accel) ----
+      const thrust = clamp(+input.thrust || 0, -1, 1);
+      const boost = !!input.boost;
+      const SURF_ACCEL = 28;           // lander thrust accel (u/s^2)
+      const SURF_BOOST = 2.2;          // boost multiplier
+      const accel = SURF_ACCEL * (boost ? SURF_BOOST : 1);
+      s.vel[1] -= this._surfGravity * dt;
+      s.vel[0] += F[0] * thrust * accel * dt;
+      s.vel[1] += F[1] * thrust * accel * dt;
+      s.vel[2] += F[2] * thrust * accel * dt;
+
+      // ---- 4) Mild linear drag (frame-rate-independent exp bleed) ----
+      const SURF_DRAG = 0.7;           // per-sec velocity bleed
+      const keep = Math.exp(-SURF_DRAG * dt);
+      s.vel[0] *= keep; s.vel[1] *= keep; s.vel[2] *= keep;
+
+      // ---- 5) Cap a sane surface top speed (boost lifts it) ----
+      const SURF_TOP = 260 * (boost ? SURF_BOOST : 1);
+      let sp = Math.hypot(s.vel[0], s.vel[1], s.vel[2]);
+      if (sp > SURF_TOP && sp > 0) {
+        const k = SURF_TOP / sp;
+        s.vel[0] *= k; s.vel[1] *= k; s.vel[2] *= k;
+      }
+
+      // ---- 6) Integrate position ----
+      s.pos[0] += s.vel[0] * dt;
+      s.pos[1] += s.vel[1] * dt;
+      s.pos[2] += s.vel[2] * dt;
+
+      // ---- 7) Clamp X/Z to the playable square; kill outward vel ----
+      if (s.pos[0] >  ext) { s.pos[0] =  ext; if (s.vel[0] > 0) s.vel[0] = 0; }
+      if (s.pos[0] < -ext) { s.pos[0] = -ext; if (s.vel[0] < 0) s.vel[0] = 0; }
+      if (s.pos[2] >  ext) { s.pos[2] =  ext; if (s.vel[2] > 0) s.vel[2] = 0; }
+      if (s.pos[2] < -ext) { s.pos[2] = -ext; if (s.vel[2] < 0) s.vel[2] = 0; }
+
+      // ---- 8) Ground collision: never sink below terrain + clearance ----
+      let terrain = ht(s.pos[0], s.pos[2]);
+      if (!isFinite(terrain)) terrain = 0;
+      const gy = terrain + clearance;
+      s.grounded = false;
+      if (s.pos[1] <= gy) {
+        const vDown = -s.vel[1];                 // >0 means descending into ground
+        s.pos[1] = gy;
+        if (s.vel[1] < 0) s.vel[1] = 0;          // anti-bounce: kill downward vel
+        // Soft touchdown (low impact speed) => landed; hard hit => bump only.
+        s.grounded = (vDown < 40);
+        if (s.grounded) {
+          // bleed horizontal velocity hard so a landed ship settles to rest.
+          const settle = Math.exp(-6 * dt);
+          s.vel[0] *= settle; s.vel[2] *= settle;
+        }
+      }
+
+      // ---- 9) Publish speed / altitude / throttle; guard NaN ----
+      s.speed = Math.hypot(s.vel[0], s.vel[1], s.vel[2]);
+      s.altitude = s.pos[1] - terrain;
+      if (!isFinite(s.speed)) s.speed = 0;
+      if (!isFinite(s.altitude)) s.altitude = 0;
+      for (let i = 0; i < 3; i++) {
+        if (!isFinite(s.pos[i])) s.pos[i] = 0;
+        if (!isFinite(s.vel[i])) s.vel[i] = 0;
+      }
+      s.throttle += (thrust - s.throttle) * (1 - Math.exp(-6 * dt));
+
+      return s;
+    },
+
+    /* surfaceCameraGoal(mode, heightAt)
+       -> { targetX,targetY,targetZ, dist, yaw, pitch } in the SAME
+       Camera3D orbit convention as cameraGoal(), so the orchestrator
+       can feed it straight to Camera3D.setGoal().
+
+       'chase'   : behind + above the ship, looking along the heading
+                   toward the horizon (target a bit ahead and above).
+       'cockpit' : tight to the nose, looking forward.
+
+       The optional heightAt(x,z) callback, when supplied, lifts the
+       computed TARGET height so the framed point stays above terrain;
+       the eye sits at target - dist*F. Whether or not heightAt is
+       given, a fixed lift keeps the eye comfortably above ground for
+       the gentle chase pitch used here. Returns finite goal. */
+    surfaceCameraGoal(mode, heightAt) {
+      const s = this.state;
+      const tight = mode === 'cockpit';
+
+      // Surface framing is in fixed world units (terrain is ~extent across,
+      // but the ship is small, so we don't scale by viewRadius here).
+      const dist  = tight ? 10 : 70;     // boom length behind the ship
+      const ahead = tight ? 6  : 22;     // look-ahead along F
+      const lift  = tight ? 1.5 : 26;    // raise the target (world +Y)
+
+      // For the chase cam we look along the HEADING (yaw only, level-ish)
+      // so the horizon stays framed even when the ship pitches; cockpit
+      // follows the actual nose pitch for an immersive view.
+      const F = tight ? forwardFrom(s.yaw, s.pitch) : forwardFrom(s.yaw, 0);
+
+      let targetY = s.pos[1] + F[1] * ahead + lift;
+      if (typeof heightAt === 'function') {
+        let h = heightAt(s.pos[0] + F[0] * ahead, s.pos[2] + F[2] * ahead);
+        if (!isFinite(h)) h = 0;
+        // keep the target (and thus the eye) above the terrain ahead.
+        const minY = h + lift;
+        if (targetY < minY) targetY = minY;
+      }
+
+      // Camera looks along +F: invert the camera's eye-offset relation,
+      // matching cameraGoal()/camera.js exactly.
+      const camYaw   = wrap(s.yaw + Math.PI);
+      const camPitch = clamp(tight ? -s.pitch : -0.18, -1.55, 1.55);
+
+      const g = {
+        targetX: s.pos[0] + F[0] * ahead,
+        targetY: targetY,
+        targetZ: s.pos[2] + F[2] * ahead,
+        dist: dist,
+        yaw: camYaw,
+        pitch: camPitch,
+      };
+      // NaN guard so the orchestrator never feeds a bad goal to Camera3D.
+      for (const k in g) if (!isFinite(g[k])) g[k] = 0;
+      return g;
+    },
   };
 
   globalThis.Ship = Ship;

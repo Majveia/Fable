@@ -234,6 +234,138 @@ const finite3 = (v) => isFinite(v[0]) && isFinite(v[1]) && isFinite(v[2]);
     'cruise=' + cruise.toFixed(0) + ' boost=' + boosted.toFixed(0));
 }
 
+// ========================================================== SURFACE MODE
+// ---------------------------------------------------------- (S1) gravity makes you fall
+{
+  const flat = () => 0;
+  Ship.surfaceReset({ spawn: { pos: [0, 500, 0], yaw: 0 }, gravity: 12, extent: 1200 });
+  const y0 = Ship.state.pos[1];
+  // zero thrust: gravity pulls you down (and you stay well above the ground)
+  for (let i = 0; i < 20; i++) Ship.surfaceUpdate(0.05, { thrust: 0 }, flat);
+  check('surface: zero thrust falls under gravity', Ship.state.pos[1] < y0,
+    'y ' + y0.toFixed(1) + ' -> ' + Ship.state.pos[1].toFixed(1));
+}
+
+// ---------------------------------------------------------- (S2) never sinks below heightAt+clearance
+{
+  // bumpy terrain so collision must track height across X/Z
+  const heightAt = (x, z) => 40 * Math.sin(x * 0.01) + 30 * Math.cos(z * 0.013) + 60;
+  Ship.surfaceReset({ spawn: { pos: [0, 300, 0], yaw: 0 }, gravity: 14, extent: 1000, clearance: 6 });
+  const rng = makeRng(123);
+  let belowGround = false, minClear = Infinity;
+  for (let i = 0; i < 2000; i++) {
+    Ship.surfaceUpdate(0.05, {
+      thrust: rng() * 2 - 1, pitch: rng() * 2 - 1,
+      yaw: rng() * 2 - 1, roll: rng() * 2 - 1, boost: rng() > 0.8,
+    }, heightAt);
+    const p = Ship.state.pos;
+    const floor = heightAt(p[0], p[2]) + 6;
+    if (p[1] < floor - 1e-6) belowGround = true;
+    minClear = Math.min(minClear, p[1] - heightAt(p[0], p[2]));
+  }
+  check('surface: never sinks below heightAt+clearance', !belowGround,
+    'min(y-h)=' + minClear.toFixed(3));
+}
+
+// ---------------------------------------------------------- (S3) upward thrust gains altitude
+{
+  const flat = () => 0;
+  Ship.surfaceReset({ spawn: { pos: [0, 50, 0], yaw: 0 }, gravity: 12, extent: 1200 });
+  // pitch the nose UP, then burn: a lander climbs by tilting back + thrust.
+  for (let i = 0; i < 25; i++) Ship.surfaceUpdate(0.05, { pitch: 1, thrust: 0 }, flat);
+  const yBefore = Ship.state.pos[1];
+  for (let i = 0; i < 60; i++) Ship.surfaceUpdate(0.05, { pitch: 1, thrust: 1, boost: true }, flat);
+  check('surface: nose-up thrust gains altitude', Ship.state.pos[1] > yBefore + 5,
+    'y ' + yBefore.toFixed(1) + ' -> ' + Ship.state.pos[1].toFixed(1));
+}
+
+// ---------------------------------------------------------- (S4) X/Z clamped to +/- extent
+{
+  const flat = () => 0;
+  const EXT = 800;
+  Ship.surfaceReset({ spawn: { pos: [0, 200, 0], yaw: 0 }, gravity: 12, extent: EXT });
+  const rng = makeRng(55);
+  let inBounds = true;
+  for (let i = 0; i < 3000; i++) {
+    Ship.surfaceUpdate(0.05, {
+      thrust: 1, pitch: rng() - 0.5, yaw: rng() * 2 - 1, roll: rng() * 2 - 1, boost: true,
+    }, flat);
+    const p = Ship.state.pos;
+    if (Math.abs(p[0]) > EXT + 1e-6 || Math.abs(p[2]) > EXT + 1e-6) { inBounds = false; break; }
+  }
+  check('surface: X/Z stay within +/- extent', inBounds,
+    'pos=[' + Ship.state.pos.map(x => x.toFixed(0)).join(',') + ']');
+}
+
+// ---------------------------------------------------------- (S5) finite + grounded flag across a long run
+{
+  const heightAt = (x, z) => 20 * Math.sin(x * 0.02) + 25 * Math.cos(z * 0.017) + 50;
+  Ship.surfaceReset({ spawn: { pos: [10, 400, -10], yaw: 0.7 }, gravity: 13, extent: 900 });
+  const rng = makeRng(2026);
+  let finite = true, sawGrounded = false;
+  for (let i = 0; i < 4000; i++) {
+    const st = Ship.surfaceUpdate(rng() * 0.06, {
+      thrust: rng() * 2 - 1, yaw: rng() * 2 - 1,
+      pitch: rng() * 2 - 1, roll: rng() * 2 - 1, boost: rng() > 0.85,
+    }, heightAt);
+    if (!finite3(st.pos) || !finite3(st.vel) || !isFinite(st.speed) ||
+        !isFinite(st.yaw) || !isFinite(st.pitch) || !isFinite(st.roll) ||
+        !isFinite(st.altitude)) { finite = false; break; }
+    if (st.grounded) sawGrounded = true;
+  }
+  check('surface: state finite across long run', finite,
+    'speed=' + Ship.state.speed.toFixed(1) + ' alt=' + Ship.state.altitude.toFixed(1));
+  check('surface: grounded flag set on touchdown at least once', sawGrounded);
+}
+
+// ---------------------------------------------------------- (S6) settles on the ground with zero input
+{
+  const flat = () => 0;
+  Ship.surfaceReset({ spawn: { pos: [0, 8, 0], yaw: 0 }, gravity: 12, extent: 1200, clearance: 6 });
+  for (let i = 0; i < 120; i++) Ship.surfaceUpdate(0.05, { thrust: 0 }, flat);
+  const grounded = Ship.state.grounded;
+  const atFloor = Math.abs(Ship.state.pos[1] - 6) < 1e-3;
+  check('surface: rests on the ground (grounded + at clearance)', grounded && atFloor,
+    'y=' + Ship.state.pos[1].toFixed(3) + ' grounded=' + grounded);
+  check('surface: altitude == clearance when landed', Math.abs(Ship.state.altitude - 6) < 1e-3,
+    'alt=' + Ship.state.altitude.toFixed(3));
+}
+
+// ---------------------------------------------------------- (S7) surfaceCameraGoal finite
+{
+  const heightAt = (x, z) => 30 * Math.sin(x * 0.01) + 40;
+  Ship.surfaceReset({ spawn: { pos: [120, 200, -60], yaw: 0.5 }, gravity: 12, extent: 1000 });
+  for (let i = 0; i < 12; i++) Ship.surfaceUpdate(0.05, { yaw: 1, pitch: 1, thrust: 0.5 }, heightAt);
+
+  const goalFinite = (g) => g && ['targetX', 'targetY', 'targetZ', 'dist', 'yaw', 'pitch']
+    .every(k => isFinite(g[k]));
+
+  const chase = Ship.surfaceCameraGoal('chase', heightAt);
+  const cockpit = Ship.surfaceCameraGoal('cockpit', heightAt);
+  const chaseNoHt = Ship.surfaceCameraGoal('chase');
+  check('surface: cameraGoal chase finite', goalFinite(chase), 'dist=' + chase.dist.toFixed(1));
+  check('surface: cameraGoal cockpit finite', goalFinite(cockpit), 'dist=' + cockpit.dist.toFixed(1));
+  check('surface: cameraGoal chase finite without heightAt', goalFinite(chaseNoHt));
+  check('surface: cockpit boom tighter than chase', cockpit.dist < chase.dist,
+    cockpit.dist.toFixed(1) + ' < ' + chase.dist.toFixed(1));
+
+  // Feed through the REAL Camera3D and confirm the chase view looks along
+  // the ship HEADING (yaw), matching the same convention as space cameraGoal.
+  Camera3D.setGoal(chase);
+  Camera3D.snap();
+  const eye = Camera3D.eye();
+  const t = Camera3D.target;
+  const view = [t.x - eye.x, t.y - eye.y, t.z - eye.z];
+  const vm = mag(view) || 1;
+  view[0] /= vm; view[1] /= vm; view[2] /= vm;
+  const heading = [Math.sin(Ship.state.yaw), 0, Math.cos(Ship.state.yaw)];
+  const hm = mag(heading) || 1;
+  const cosHeading = (view[0] * heading[0] + view[2] * heading[2]) /
+    (Math.hypot(view[0], view[2]) || 1);
+  check('surface: chase view points along ship heading', cosHeading > 0.9,
+    'cosHeading=' + cosHeading.toFixed(4));
+}
+
 console.log('\n' + (failed === 0 ? 'ALL TESTS PASSED' : 'SOME TESTS FAILED') +
   '  (' + passed + '/' + (passed + failed) + ')');
 process.exit(failed ? 1 : 0);

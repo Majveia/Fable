@@ -380,6 +380,149 @@ void main() {
   outColor = vec4(col, 1.0);
 }`;
 
+  /* ---- SURFACE SKY pass (planet-surface landings) ----
+     A full-screen sky gradient drawn with an attribute-less fullscreen
+     triangle (same trick as FADE/PRESENT). For every fragment we
+     reconstruct the world-space view ray from the inverse viewProj and
+     the NDC position, then blend zenith->horizon by view elevation and
+     add a soft sun disk/glow in the sky.sun direction. Runs first in the
+     surface path, depth test OFF, writing opaque colour over the cleared
+     buffer so the terrain + ship draw on top against a real sky. */
+  const SKY_VERT_SRC = `#version 300 es
+precision highp float;
+out vec2 v_ndc;
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_ndc = p * 2.0 - 1.0;
+  gl_Position = vec4(v_ndc, 0.0, 1.0);
+}`;
+
+  const SKY_FRAG_SRC = `#version 300 es
+precision highp float;
+in vec2 v_ndc;
+uniform mat4 u_invViewProj;   // clip -> world
+uniform vec3 u_eye;           // world-space camera position
+uniform vec3 u_horizon;
+uniform vec3 u_zenith;
+uniform vec3 u_sun;           // unit direction toward the sun (world)
+uniform vec3 u_sunColor;
+out vec4 outColor;
+void main() {
+  // reconstruct the world-space view ray for this pixel.
+  vec4 nf = u_invViewProj * vec4(v_ndc, 1.0, 1.0);
+  vec3 far = nf.xyz / nf.w;
+  vec3 dir = normalize(far - u_eye);
+  // elevation: -1 straight down, 0 horizon, +1 straight up (+Y is UP).
+  float elev = clamp(dir.y, -1.0, 1.0);
+  // gradient: horizon band near elev 0, zenith as we look up. Below the
+  // horizon we keep the horizon colour (terrain covers most of it anyway).
+  float t = clamp(elev, 0.0, 1.0);
+  t = pow(t, 0.55);                       // richer band near the horizon
+  vec3 sky = mix(u_horizon, u_zenith, t);
+  // soft sun disk + broad glow in the sun direction.
+  float c = max(dot(dir, normalize(u_sun)), 0.0);
+  float disk = smoothstep(0.9975, 0.9994, c);          // tight bright core
+  float glow = pow(c, 180.0) * 0.6 + pow(c, 8.0) * 0.18; // halo + wide bloom
+  vec3 col = sky + u_sunColor * (disk * 1.4 + glow);
+  // fade the sun glow out below the horizon so it does not bleed underground.
+  col = mix(sky, col, smoothstep(-0.15, 0.02, elev));
+  outColor = vec4(col, 1.0);
+}`;
+
+  /* ---- SURFACE TERRAIN pass (planet-surface landings) ----
+     Solid, depth-tested, Lambert-shaded terrain with distance fog toward
+     sky.fog. Interleaved VBO [pos.xyz, norm.xyz, color.rgb] exactly like
+     the overlay mesh pass, so the same interleave routine feeds it. Fog
+     mixes by exp(-fogDensity * dist) where dist is eye->fragment distance,
+     so the terrain dissolves into the horizon/sky colour. */
+  const SURF_MESH_VERT_SRC = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 a_pos;    // SURFACE-SPACE vertex position
+layout(location = 1) in vec3 a_norm;   // SURFACE-SPACE unit normal (up-ish)
+layout(location = 2) in vec3 a_color;  // per-triangle material RGB
+uniform mat4 u_viewProj;
+uniform vec3 u_eye;
+out vec3 v_norm;
+out vec3 v_color;
+out float v_dist;
+void main() {
+  vec4 clip = u_viewProj * vec4(a_pos, 1.0);
+  gl_Position = clip;
+  v_norm = a_norm;
+  v_color = a_color;
+  v_dist = length(a_pos - u_eye);
+}`;
+
+  const SURF_MESH_FRAG_SRC = `#version 300 es
+precision highp float;
+in vec3 v_norm;
+in vec3 v_color;
+in float v_dist;
+uniform vec3  u_lightDir;    // surface-space, points TOWARD the sun (unit)
+uniform vec3  u_sunColor;
+uniform float u_ambient;     // 0..1
+uniform vec3  u_fog;         // fog / horizon colour the terrain fades into
+uniform float u_fogDensity;  // per-unit fog density
+out vec4 outColor;
+void main() {
+  vec3 N = normalize(v_norm);
+  vec3 L = normalize(u_lightDir);
+  // two-sided so any inward-wound triangle still lights.
+  float ndl = max(dot(N, L), 0.0);
+  float lit = clamp(u_ambient + ndl * (1.0 - u_ambient * 0.5), 0.0, 1.4);
+  vec3 col = v_color * lit * (vec3(1.0) * 0.55 + u_sunColor * 0.45 * (0.3 + ndl));
+  // distance fog: exp falloff toward the sky/horizon colour.
+  float fog = clamp(exp(-u_fogDensity * v_dist), 0.0, 1.0);
+  col = mix(u_fog, col, fog);
+  outColor = vec4(col, 1.0);
+}`;
+
+  /* Invert a 4x4 column-major matrix (gl-matrix style). Writes into `out`
+     (length-16) and returns it; returns the identity if singular. Used to
+     reconstruct world-space view rays for the surface sky pass. */
+  function mat4Invert(out, m) {
+    const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
+    const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
+    const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
+    const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
+    const b00 = a00 * a11 - a01 * a10;
+    const b01 = a00 * a12 - a02 * a10;
+    const b02 = a00 * a13 - a03 * a10;
+    const b03 = a01 * a12 - a02 * a11;
+    const b04 = a01 * a13 - a03 * a11;
+    const b05 = a02 * a13 - a03 * a12;
+    const b06 = a20 * a31 - a21 * a30;
+    const b07 = a20 * a32 - a22 * a30;
+    const b08 = a20 * a33 - a23 * a30;
+    const b09 = a21 * a32 - a22 * a31;
+    const b10 = a21 * a33 - a23 * a31;
+    const b11 = a22 * a33 - a23 * a32;
+    let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+    if (!det) {
+      for (let i = 0; i < 16; i++) out[i] = (i % 5 === 0) ? 1 : 0;
+      return out;
+    }
+    det = 1.0 / det;
+    out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+    out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+    out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+    out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+    out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+    out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+    out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+    out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+    out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+    out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+    out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+    out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+    out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+    out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+    out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+    out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+    return out;
+  }
+  const invVPScratch = new Float32Array(16);
+
   function compile(gl, type, src) {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, src);
@@ -407,8 +550,13 @@ void main() {
   let gl = null, canvas = null;
   let progA = null, progT = null, fadeProg = null, presentProg = null;
   let ovlLineProg = null, ovlPtProg = null, ovlMeshProg = null;
+  let skyProg = null, surfMeshProg = null;
   const uniA = {}, uniT = {}, uniF = {}, uniP = {};
   const uniOL = {}, uniOP = {}, uniOM = {};
+  const uniSky = {}, uniSM = {};
+  // surface mode flag: when true, drawOverlay() shares the existing depth
+  // buffer (no depth-clear) so the ship sits on the terrain.
+  let surfaceMode = false;
   let maxPointSize = 64;
   let cssW = 1, cssH = 1, dprV = 1;
 
@@ -422,6 +570,9 @@ void main() {
   // solid hull mesh: interleaved [pos.xyz, norm.xyz, color.rgb] = 9 floats/vert
   let ovlMeshVao = null, ovlMeshVbo = null, ovlMeshCapFloats = 0;
   let ovlMeshScratch = new Float32Array(0);
+  // surface terrain mesh: interleaved [pos.xyz, norm.xyz, color.rgb] = 9 floats/vert
+  let surfMeshVao = null, surfMeshVbo = null, surfMeshCapFloats = 0;
+  let surfMeshScratch = new Float32Array(0);
 
   let scratch = new Float32Array(0);     // all bodies, additive pass
   let opqScratch = new Float32Array(0);  // planets + BHs, sorted
@@ -536,6 +687,142 @@ void main() {
     gl.bindVertexArray(null);
   }
 
+  function ensureSurfMeshCapacity(floats) {
+    if (floats <= surfMeshCapFloats) return;
+    surfMeshCapFloats = Math.max(floats, surfMeshCapFloats * 2, 16384 * 9);
+    gl.bindVertexArray(surfMeshVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, surfMeshVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, surfMeshCapFloats * 4, gl.DYNAMIC_DRAW);
+    const stride = 9 * 4;                  // pos.xyz, norm.xyz, color.rgb
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, stride, 24);
+    gl.bindVertexArray(null);
+  }
+
+  /* Draw the SURFACE scene (planet-surface landing) onto the default
+     framebuffer: (1) a full-screen sky gradient + sun, then (2) the solid
+     Lambert-shaded + fog terrain mesh with depth write+test. Leaves the
+     depth buffer populated and depth-test enabled so the ship overlay
+     (drawn right after, in surfaceMode) occludes correctly against the
+     ground without a depth clear. Consumes surf = opts.surface =
+     { mesh:{tris,norms,triColor}, markers, sky:{...}, lightDir }. */
+  function drawSurface(surf, viewProj, eye, invViewProj) {
+    if (!surf || !skyProg) return;
+    const sky = surf.sky || {};
+    const horizon = sky.horizon || [0.5, 0.6, 0.75];
+    const zenith = sky.zenith || [0.15, 0.3, 0.6];
+    const fog = sky.fog || horizon;
+    const fogDensity = (sky.fogDensity != null) ? sky.fogDensity : 0.0006;
+    const sun = sky.sun || [0.4, 0.8, 0.3];
+    const sunColor = sky.sunColor || [1.0, 0.96, 0.9];
+    const ambient = (sky.ambient != null) ? sky.ambient : 0.3;
+    // lightDir: explicit override else the sky sun direction (toward the sun).
+    const ld = surf.lightDir || sun;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+
+    // ---- (1) SKY gradient + sun (opaque, no depth) ----
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.clear(gl.DEPTH_BUFFER_BIT);          // fresh depth for the terrain pass
+    gl.disable(gl.BLEND);
+    gl.useProgram(skyProg);
+    gl.uniformMatrix4fv(uniSky.invViewProj, false, invViewProj);
+    gl.uniform3f(uniSky.eye, eye.x, eye.y, eye.z);
+    gl.uniform3f(uniSky.horizon, horizon[0], horizon[1], horizon[2]);
+    gl.uniform3f(uniSky.zenith, zenith[0], zenith[1], zenith[2]);
+    gl.uniform3f(uniSky.sun, sun[0], sun[1], sun[2]);
+    gl.uniform3f(uniSky.sunColor, sunColor[0], sunColor[1], sunColor[2]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // ---- (2) TERRAIN (solid, depth write+test, fog) ----
+    const mesh = surf.mesh;
+    const tris = mesh && mesh.tris;
+    const norms = mesh && mesh.norms;
+    const triColor = mesh && mesh.triColor;
+    const haveMesh = surfMeshProg && tris && tris.length >= 9 &&
+                     norms && norms.length === tris.length &&
+                     triColor && triColor.length * 3 === tris.length;
+    if (haveMesh) {
+      const nVerts = tris.length / 3;        // 3 floats per vertex position
+      const nTri = tris.length / 9;          // 9 floats per triangle
+      const floats = nVerts * 9;
+      if (surfMeshScratch.length < floats) {
+        surfMeshScratch = new Float32Array(Math.max(floats, surfMeshScratch.length * 2));
+      }
+      const S = surfMeshScratch;
+      for (let t = 0; t < nTri; t++) {
+        const cr = triColor[t * 3], cg = triColor[t * 3 + 1], cb = triColor[t * 3 + 2];
+        for (let j = 0; j < 3; j++) {
+          const vi = t * 3 + j;
+          const pi = vi * 3;
+          const oi = vi * 9;
+          S[oi]     = tris[pi];     S[oi + 1] = tris[pi + 1];  S[oi + 2] = tris[pi + 2];
+          S[oi + 3] = norms[pi];    S[oi + 4] = norms[pi + 1]; S[oi + 5] = norms[pi + 2];
+          S[oi + 6] = cr;           S[oi + 7] = cg;            S[oi + 8] = cb;
+        }
+      }
+      ensureSurfMeshCapacity(floats);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+      gl.useProgram(surfMeshProg);
+      gl.uniformMatrix4fv(uniSM.viewProj, false, viewProj);
+      gl.uniform3f(uniSM.eye, eye.x, eye.y, eye.z);
+      gl.uniform3f(uniSM.lightDir, ld[0], ld[1], ld[2]);
+      gl.uniform3f(uniSM.sunColor, sunColor[0], sunColor[1], sunColor[2]);
+      gl.uniform1f(uniSM.ambient, ambient);
+      gl.uniform3f(uniSM.fog, fog[0], fog[1], fog[2]);
+      gl.uniform1f(uniSM.fogDensity, fogDensity);
+      gl.bindVertexArray(surfMeshVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, surfMeshVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, S, 0, floats);
+      gl.drawArrays(gl.TRIANGLES, 0, nVerts);
+      gl.bindVertexArray(null);
+    }
+
+    // ---- (3) MARKERS: additive point sprites (reuse ovlPtProg) ----
+    const markers = surf.markers;
+    if (ovlPtProg && markers && markers.length > 0) {
+      const np = markers.length;
+      const floats = np * 5;
+      if (ovlPtScratch.length < floats) {
+        ovlPtScratch = new Float32Array(Math.max(floats, ovlPtScratch.length * 2));
+      }
+      let o = 0;
+      for (let k = 0; k < np; k++) {
+        const p = markers[k];
+        ovlPtScratch[o++] = p.x; ovlPtScratch[o++] = p.y; ovlPtScratch[o++] = p.z;
+        ovlPtScratch[o++] = (p.colorIdx != null ? p.colorIdx : 8);
+        ovlPtScratch[o++] = (p.size != null ? p.size : 10);
+      }
+      ensureOvlPtCapacity(floats);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE);          // additive glow
+      gl.enable(gl.DEPTH_TEST);              // occlude behind terrain
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(false);                   // additive sprites don't write depth
+      gl.useProgram(ovlPtProg);
+      gl.uniformMatrix4fv(uniOP.viewProj, false, viewProj);
+      gl.uniform1f(uniOP.dpr, dprV);
+      gl.uniform1f(uniOP.maxPointSize, maxPointSize);
+      gl.bindVertexArray(ovlPtVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, ovlPtVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, ovlPtScratch, 0, floats);
+      gl.drawArrays(gl.POINTS, 0, np);
+      gl.bindVertexArray(null);
+      gl.depthMask(true);
+    }
+
+    // depth buffer + DEPTH_TEST stay so the ship overlay (surfaceMode) shares it.
+  }
+
   /* Draw the ship overlay onto the default framebuffer, AFTER PostFX
      present. Additive glowing GL_LINES (wireframe) + additive point
      sprites (markers), in node-local space via the scene viewProj. */
@@ -584,7 +871,10 @@ void main() {
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
       gl.depthMask(true);
-      gl.clear(gl.DEPTH_BUFFER_BIT);
+      // In surface mode the terrain already populated the depth buffer and the
+      // ship must occlude against it, so we must NOT clear depth here. In the
+      // universe path this clears as before (byte-for-byte unchanged).
+      if (!surfaceMode) gl.clear(gl.DEPTH_BUFFER_BIT);
       gl.disable(gl.BLEND);
       gl.useProgram(ovlMeshProg);
       gl.uniformMatrix4fv(uniOM.viewProj, false, viewProj);
@@ -602,7 +892,9 @@ void main() {
     // additive-only overlay.
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);          // additive glow
-    if (haveMesh) {
+    if (haveMesh || surfaceMode) {
+      // surface mode: keep depth testing against the terrain so glowing trim
+      // is occluded by ground between the camera and the ship.
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
     } else {
@@ -895,6 +1187,8 @@ void main() {
         ovlLineProg = link(gl, OVL_LINE_VERT_SRC, OVL_LINE_FRAG_SRC);
         ovlPtProg = link(gl, OVL_PT_VERT_SRC, OVL_PT_FRAG_SRC);
         ovlMeshProg = link(gl, OVL_MESH_VERT_SRC, OVL_MESH_FRAG_SRC);
+        skyProg = link(gl, SKY_VERT_SRC, SKY_FRAG_SRC);
+        surfMeshProg = link(gl, SURF_MESH_VERT_SRC, SURF_MESH_FRAG_SRC);
       } catch (e) {
         return null;
       }
@@ -913,6 +1207,19 @@ void main() {
       uniOP.maxPointSize = gl.getUniformLocation(ovlPtProg, 'u_maxPointSize');
       uniOM.viewProj = gl.getUniformLocation(ovlMeshProg, 'u_viewProj');
       uniOM.lightDir = gl.getUniformLocation(ovlMeshProg, 'u_lightDir');
+      uniSky.invViewProj = gl.getUniformLocation(skyProg, 'u_invViewProj');
+      uniSky.eye = gl.getUniformLocation(skyProg, 'u_eye');
+      uniSky.horizon = gl.getUniformLocation(skyProg, 'u_horizon');
+      uniSky.zenith = gl.getUniformLocation(skyProg, 'u_zenith');
+      uniSky.sun = gl.getUniformLocation(skyProg, 'u_sun');
+      uniSky.sunColor = gl.getUniformLocation(skyProg, 'u_sunColor');
+      uniSM.viewProj = gl.getUniformLocation(surfMeshProg, 'u_viewProj');
+      uniSM.eye = gl.getUniformLocation(surfMeshProg, 'u_eye');
+      uniSM.lightDir = gl.getUniformLocation(surfMeshProg, 'u_lightDir');
+      uniSM.sunColor = gl.getUniformLocation(surfMeshProg, 'u_sunColor');
+      uniSM.ambient = gl.getUniformLocation(surfMeshProg, 'u_ambient');
+      uniSM.fog = gl.getUniformLocation(surfMeshProg, 'u_fog');
+      uniSM.fogDensity = gl.getUniformLocation(surfMeshProg, 'u_fogDensity');
 
       const range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
       maxPointSize = (range && range[1]) ? range[1] : 64;
@@ -942,11 +1249,13 @@ void main() {
       ovlLineVao = gl.createVertexArray(); ovlLineVbo = gl.createBuffer();
       ovlPtVao = gl.createVertexArray(); ovlPtVbo = gl.createBuffer();
       ovlMeshVao = gl.createVertexArray(); ovlMeshVbo = gl.createBuffer();
+      surfMeshVao = gl.createVertexArray(); surfMeshVbo = gl.createBuffer();
       ensureDynCapacity(1);
       ensureOpqCapacity(1);
       ensureOvlLineCapacity(1);
       ensureOvlPtCapacity(1);
       ensureOvlMeshCapacity(1);
+      ensureSurfMeshCapacity(1);
       buildBackground();
 
       gl.disable(gl.DEPTH_TEST);
@@ -1014,6 +1323,31 @@ void main() {
       const light = opts.lightPos || { x: 0, y: 1e4, z: 0 };
       const trails = !!opts.trails;
       const haveTarget = !!targetFormat;
+
+      // ---- SURFACE PATH (planet-surface landing) ----
+      // When opts.surface is present we render a planet scene directly to the
+      // default framebuffer: a full-screen sky gradient + sun, the solid
+      // depth-tested + fogged terrain, additive markers, and the ship overlay
+      // on top sharing the SAME depth buffer (no depth clear in drawOverlay).
+      // The universe body/FBO/PostFX passes are skipped entirely; nothing
+      // below this block runs, so the universe path stays byte-for-byte the
+      // same when opts.surface is absent.
+      if (opts.surface) {
+        const invVP = mat4Invert(invVPScratch, viewProj);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(CLEAR[0], CLEAR[1], CLEAR[2], 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        drawSurface(opts.surface, viewProj, eye, invVP);
+        surfaceMode = true;
+        drawOverlay(opts.overlay, viewProj);
+        surfaceMode = false;
+        // restore the renderer's default GL state (matches every other pass).
+        gl.disable(gl.DEPTH_TEST);
+        gl.depthMask(true);
+        gl.enable(gl.BLEND);
+        return;
+      }
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, haveTarget ? fbo : null);
       gl.viewport(0, 0, canvas.width, canvas.height);
