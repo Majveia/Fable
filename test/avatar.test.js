@@ -238,6 +238,62 @@ const NONE = { fwd: 0, strafe: 0, turn: 0, lookPitch: 0, run: false };
     'moving=' + Avatar.state.moving);
 }
 
+// ---------------------------------------------------------- (10) v13 SURFACE WALK
+{
+  const flat = () => 0;
+  // falls under gravity to the ground and settles there
+  Avatar.surfaceReset({ pos: [0, 60, 0], yaw: 0, extent: 1000 });
+  for (let i = 0; i < 400; i++) Avatar.updateOnSurface(0.016, NONE, flat, 1000);
+  check('surface: gravity settles avatar onto flat ground',
+    Math.abs(Avatar.state.pos[1]) < 0.5, 'y=' + Avatar.state.pos[1].toFixed(3));
+
+  // never sinks below the terrain over a long run with random-ish input
+  Avatar.surfaceReset({ pos: [0, 0, 0], yaw: 0, extent: 1000 });
+  let sank = false, allFinite = true;
+  const bump = (x, z) => 3 * Math.sin(x * 0.05) + 2 * Math.cos(z * 0.04);
+  for (let i = 0; i < 600; i++) {
+    Avatar.updateOnSurface(0.016, { ...NONE, fwd: 1, turn: (i % 90 < 45) ? 0.3 : -0.3 }, bump, 1000);
+    if (Avatar.state.pos[1] < bump(Avatar.state.pos[0], Avatar.state.pos[2]) - 0.6) sank = true;
+    if (!finite3(Avatar.state.pos)) allFinite = false;
+  }
+  check('surface: never sinks through bumpy terrain', !sank);
+  check('surface: state stays finite over a long run', allFinite);
+
+  // walking forward moves you and flags moving
+  Avatar.surfaceReset({ pos: [0, 0, 0], yaw: 0, extent: 1000 });
+  for (let i = 0; i < 120; i++) Avatar.updateOnSurface(0.016, { ...NONE, fwd: 1 }, flat, 1000);
+  check('surface: walking forward advances +Z', Avatar.state.pos[2] > 5,
+    'z=' + Avatar.state.pos[2].toFixed(2));
+  check('surface: moving flag set while walking', Avatar.state.moving === true);
+
+  // climbs a slope (heightAt rises with +X); face +X (yaw=PI/2) and walk
+  Avatar.surfaceReset({ pos: [0, 0, 0], yaw: Math.PI / 2, extent: 1000 });
+  const slope = (x) => x * 0.2;
+  for (let i = 0; i < 150; i++) Avatar.updateOnSurface(0.016, { ...NONE, fwd: 1 }, slope, 1000);
+  check('surface: climbs a slope (y tracks terrain)',
+    Avatar.state.pos[0] > 5 && Math.abs(Avatar.state.pos[1] - slope(Avatar.state.pos[0])) < 0.5,
+    'x=' + Avatar.state.pos[0].toFixed(1) + ' y=' + Avatar.state.pos[1].toFixed(2));
+
+  // X/Z stay within the extent square
+  Avatar.surfaceReset({ pos: [0, 0, 0], yaw: 0, extent: 40 });
+  for (let i = 0; i < 500; i++) Avatar.updateOnSurface(0.016, { ...NONE, fwd: 1, run: true }, flat, 40);
+  check('surface: clamped inside the extent square',
+    Math.abs(Avatar.state.pos[0]) <= 40.001 && Math.abs(Avatar.state.pos[2]) <= 40.001,
+    'pos=[' + Avatar.state.pos.map(x => x.toFixed(1)).join(',') + ']');
+
+  // mounts are finite frames
+  const fp = Avatar.surfaceMount('fp', flat);
+  const tp = Avatar.surfaceMount('tp', flat);
+  check('surface: fp mount finite', finite3(fp.pos) && finite3(fp.forward) && finite3(fp.up));
+  check('surface: tp mount finite + above ground',
+    finite3(tp.pos) && finite3(tp.forward) && tp.pos[1] >= -1);
+
+  // the in-ship API still works (unbroken)
+  check('surface: in-ship reset/update/cameraMount intact',
+    typeof Avatar.reset === 'function' && typeof Avatar.update === 'function' &&
+    typeof Avatar.cameraMount === 'function');
+}
+
 console.log('\n' + (failed === 0 ? 'ALL TESTS PASSED' : 'SOME TESTS FAILED') +
   '  (' + passed + '/' + (passed + failed) + ')');
 process.exit(failed ? 1 : 0);

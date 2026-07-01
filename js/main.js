@@ -256,9 +256,13 @@ let camMode = 'chase';            // FLY camera: chase | cockpit | orbit
 let walkMode = false;             // on foot inside the ship
 let walkView = 'fp';              // walk camera: fp | tp
 let overlay = null;               // ship wireframe overlay (node-local), per frame
-let surfaceMode = false;          // landed on / flying a planet surface
+let surfaceMode = false;          // on a planet surface (piloting OR on foot)
 let surface = null;               // Surface descriptor (mesh/sky/heightAt/spawn/...)
-let surfView = 'chase';           // surface camera: chase | cockpit
+let surfView = 'chase';           // surface LANDER camera: chase | cockpit
+let surfaceWalk = false;          // v13: out of the lander, walking on foot
+let surfWalkView = 'fp';          // on-foot surface camera: fp | tp
+let surfaceNodeId = null;         // planet node id for the current surface
+const metOutposts = new Set();    // outposts whose crew you've already met
 let scanHeld = false;
 let pois = [];
 let lmList = [];
@@ -473,6 +477,11 @@ function buildOverlay() {
   if (walkMode && globalThis.Avatar) {
     const ap = shipToLocal(Avatar.state.pos, b, scale, o);
     pts.push({ x: ap[0], y: ap[1] + scale * 0.06, z: ap[2], colorIdx: 8, size: scale * 0.9 });
+  } else if (surfaceWalk && globalThis.Avatar) {
+    // On foot on a planet: the avatar walks the terrain in SURFACE/WORLD space
+    // directly (no ship transform); mark yourself so you're visible in TP.
+    const a = Avatar.state.pos;
+    pts.push({ x: a[0], y: a[1] + 1.4, z: a[2], colorIdx: 8, size: 18 });
   }
   overlay = {
     lines: out, lineColor: ShipModel.lineColor || [0.32, 0.9, 1.0], points: pts,
@@ -506,20 +515,25 @@ function landOnPlanet() {
   });
   if (walkMode) { walkMode = false; }
   surfaceMode = true;
+  surfaceWalk = false;
   surfView = 'chase';
+  surfaceNodeId = node.id || 'surf';
+  metOutposts.clear();
   Ship.surfaceReset({ spawn: surface.spawn, gravity: 12, extent: surface.extent, clearance: 5 });
   buildOverlay();
   const g = Ship.surfaceCameraGoal(surfView, surface.heightAt);
   if (g) { Camera3D.setGoal(g); Camera3D.snap(); }
   if (globalThis.HUD) HUD.toast('LANDING · ' + (surface.archetype || '').toUpperCase() +
-    ' SURFACE', '#ffb347');
+    ' SURFACE · press X to step out', '#ffb347');
   if (globalThis.Score) Score.discovery();
 }
 
 function leaveSurface() {
   if (!surfaceMode) return;
   surfaceMode = false;
+  surfaceWalk = false;
   surface = null;
+  surfaceNodeId = null;
   // Re-establish orbit at the same planet node and snap the chase cam on.
   spawnShip(Navigator.active);
   buildOverlay();
@@ -529,19 +543,96 @@ function leaveSurface() {
   if (globalThis.Score) Score.bounty();
 }
 
-// Minimal cockpit readout while on a planet surface: speed, altitude,
-// heading and the camera mode (the full POI/scan HUD is orbit-only).
+/* v13 — step out of the parked lander to explore on foot, and climb back in.
+   Boarding requires standing near the ship. */
+function toggleSurfaceWalk() {
+  if (!surfaceMode || !surface || !globalThis.Avatar || !globalThis.Ship) return;
+  if (!surfaceWalk) {
+    const sp = Ship.state.pos;
+    const ax = clampToExtent(sp[0] + 10, surface.extent);
+    const az = clampToExtent(sp[2], surface.extent);
+    const gy = surface.heightAt(ax, az);
+    Avatar.surfaceReset({ pos: [ax, isFinite(gy) ? gy : 0, az], yaw: Ship.state.yaw, extent: surface.extent });
+    surfaceWalk = true;
+    surfWalkView = 'fp';
+    surfaceWalkCamera();
+    if (globalThis.HUD) HUD.toast('ON FOOT · ' + surface.archetype.toUpperCase() +
+      ' · find an outpost, return to your ship to fly', '#37e6ff');
+  } else {
+    const a = Avatar.state.pos, sp = Ship.state.pos;
+    if (Math.hypot(a[0] - sp[0], a[2] - sp[2]) > 32) {
+      toast('RETURN TO YOUR SHIP TO BOARD');
+      return;
+    }
+    surfaceWalk = false;
+    const g = Ship.surfaceCameraGoal(surfView, surface.heightAt);
+    if (g) { Camera3D.setGoal(g); Camera3D.snap(); }
+    if (globalThis.HUD) HUD.toast('ABOARD · at the helm', '#37e6ff');
+  }
+}
+function clampToExtent(v, ext) { const e = ext || 1200; return v < -e ? -e : (v > e ? e : v); }
+
+// Aim the camera from the on-foot avatar's surface mount (world space).
+function surfaceWalkCamera() {
+  if (!globalThis.Avatar || !surface) return;
+  const m = Avatar.surfaceMount(surfWalkView, surface.heightAt);
+  aimCamera(m.pos, norm(m.forward), surfWalkView === 'tp' ? 7 : 0.35);
+}
+
+// Walking near an outpost meets its crew (once): a toast + the crew logged.
+function checkOutpostProximity() {
+  if (!surface || !surface.outposts || !globalThis.Avatar) return;
+  const a = Avatar.state.pos;
+  for (const o of surface.outposts) {
+    const d = Math.hypot(a[0] - o.pos[0], a[2] - o.pos[2]);
+    const okey = (surfaceNodeId || '') + '|' + o.name;
+    if (d < 18 && !metOutposts.has(okey)) {
+      metOutposts.add(okey);
+      if (globalThis.NPC) {
+        const crew = NPC.atOutpost(o.name, o.kind);
+        if (crew && crew.length) {
+          const who = crew[0];
+          if (globalThis.HUD) {
+            HUD.toast('OUTPOST · ' + o.name.toUpperCase() + ' — ' + who.name + ' (' + who.role + ')', '#ffb347');
+            for (const p of crew) HUD.logEntry('outpost', p.name + ' · ' + p.species + ' · ' + p.role, NPC.greeting(p));
+          }
+        }
+      }
+      if (globalThis.Score) Score.discovery();
+    }
+  }
+}
+
+// Cockpit / on-foot readout while on a planet surface. The full POI/scan HUD
+// is orbit-only; here we show speed+altitude (lander) or an on-foot line.
 function surfaceHUD(input) {
   if (!globalThis.HUD || !globalThis.Ship) return;
   const s = Ship.state;
+  const arch = surface ? surface.archetype.toUpperCase() : '';
+  let breadcrumb, coords, heading, speed;
+  if (surfaceWalk && globalThis.Avatar) {
+    const a = Avatar.state;
+    // distance to the nearest outpost as a gentle wayfinding hint
+    let nearest = Infinity, nname = '';
+    if (surface.outposts) for (const o of surface.outposts) {
+      const d = Math.hypot(a.pos[0] - o.pos[0], a.pos[2] - o.pos[2]);
+      if (d < nearest) { nearest = d; nname = o.name; }
+    }
+    const hint = isFinite(nearest) ? ' · ' + nname.toUpperCase() + ' ' + Math.round(nearest) + 'm' : '';
+    breadcrumb = 'ON FOOT · ' + arch + hint;
+    coords = a.pos; heading = [a.yaw, a.pitch]; speed = a.moving ? 6 : 0;
+  } else {
+    breadcrumb = 'SURFACE · ' + arch + ' · ALT ' + Math.max(0, Math.round(s.altitude)) +
+      (s.grounded ? ' · LANDED' : '');
+    coords = s.pos; heading = [s.yaw, s.pitch]; speed = s.speed;
+  }
   HUD.update({
-    speed: s.speed,
+    speed: speed,
     throttle: input.thrust > 0 ? input.thrust : 0,
     boost: !!input.boost,
-    breadcrumb: 'SURFACE · ' + (surface ? surface.archetype.toUpperCase() : '') +
-      ' · ALT ' + Math.max(0, Math.round(s.altitude)) + (s.grounded ? ' · LANDED' : ''),
-    coords: s.pos, heading: [s.yaw, s.pitch], fps: fpsSmooth,
-    mode: 'surface ' + surfView,
+    breadcrumb: breadcrumb,
+    coords: coords, heading: heading, fps: fpsSmooth,
+    mode: surfaceWalk ? ('on-foot ' + surfWalkView) : ('surface ' + surfView),
     scanProgress: 0, target: null, bounty: globalThis.Drifter ? Drifter.activeBounty : null,
   });
 }
@@ -780,14 +871,18 @@ window.addEventListener('keydown', (e) => {
       enterUniverse(null);   // jump into a fresh drifter universe
       break;
     case 'x': case 'X':
-      if (universeMode) toggleWalk();      // enter / leave the ship on foot
+      if (surfaceMode) toggleSurfaceWalk();  // step out of / climb back into the lander
+      else if (universeMode) toggleWalk();   // enter / leave the ship on foot
       break;
     case 'l': case 'L':
       if (surfaceMode) leaveSurface();
       else if (universeMode) landOnPlanet();
       break;
     case 'v': case 'V':
-      if (surfaceMode) {
+      if (surfaceMode && surfaceWalk) {
+        surfWalkView = surfWalkView === 'fp' ? 'tp' : 'fp';
+        toast('VIEW · ' + surfWalkView.toUpperCase());
+      } else if (surfaceMode) {
         surfView = surfView === 'cockpit' ? 'chase' : 'cockpit';
         toast('VIEW · ' + (surfView === 'cockpit' ? 'FIRST PERSON' : 'THIRD PERSON'));
       } else if (universeMode) {
@@ -952,18 +1047,34 @@ function frame(now) {
   // the universe (LOD + floating origin) around the ship's position; on a
   // level change repopulate, respawn the ship, and rebuild this node's POIs.
   if (surfaceMode && globalThis.Ship && surface) {
-    // ON A PLANET SURFACE: gravity flight + ground collision; the camera
-    // chases the lander over the terrain; the Navigator/LOD is paused.
+    // ON A PLANET SURFACE. The Navigator/LOD is paused; the lander sits where
+    // it landed. Either pilot the lander, or (v13) walk the terrain on foot.
+    // NOTE: buildShipInput/buildAvatarInput each DRAIN the steer accumulator,
+    // so call exactly one per frame (whichever mode is active).
     dtSecLast = dtMs / 1000;
-    const input = buildShipInput();
-    if (!engine.cfg.paused) {
-      Ship.surfaceUpdate(dtSecLast, input, surface.heightAt);
-      const g = Ship.surfaceCameraGoal(surfView, surface.heightAt);
-      if (g) Camera3D.setGoal(g);
-      if (globalThis.Score) Score.setThrust(input.thrust > 0 ? (input.boost ? 1 : 0.6) : 0);
+    if (surfaceWalk && globalThis.Avatar) {
+      // ON FOOT: walk the alien ground; the parked lander stays put.
+      const ainput = buildAvatarInput();
+      if (!engine.cfg.paused) {
+        Avatar.updateOnSurface(dtSecLast, ainput, surface.heightAt, surface.extent);
+        surfaceWalkCamera();
+        checkOutpostProximity();
+        if (globalThis.Score) Score.setThrust(0);
+      }
+      buildOverlay();
+      surfaceHUD({ thrust: 0, boost: false });
+    } else {
+      // PILOT the lander: gravity flight + ground collision; camera chases it.
+      const input = buildShipInput();
+      if (!engine.cfg.paused) {
+        Ship.surfaceUpdate(dtSecLast, input, surface.heightAt);
+        const g = Ship.surfaceCameraGoal(surfView, surface.heightAt);
+        if (g) Camera3D.setGoal(g);
+        if (globalThis.Score) Score.setThrust(input.thrust > 0 ? (input.boost ? 1 : 0.6) : 0);
+      }
+      buildOverlay();
+      surfaceHUD(input);
     }
-    buildOverlay();
-    surfaceHUD(input);
   } else if (universeMode && globalThis.Navigator && Navigator.active) {
     dtSecLast = dtMs / 1000;
     const input = buildShipInput();
@@ -1055,7 +1166,8 @@ function frame(now) {
     attribsVersion: engine.attribsVersion || 0,
     overlay: ((surfaceMode || universeMode) && overlay) ? overlay : null,   // solid ship
     surface: (surfaceMode && surface) ? {                  // planet-surface scene
-      mesh: surface.mesh, markers: surface.markers, sky: surface.sky,
+      mesh: surface.mesh, propMesh: surface.propMesh, markers: surface.markers,
+      sky: surface.sky, water: surface.water, extent: surface.extent, timeMs: now,
     } : null,
   });
   requestAnimationFrame(frame);

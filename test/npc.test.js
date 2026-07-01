@@ -193,5 +193,45 @@ const PLACES = [
   }
 }
 
+/* ---------------- v13 outpost crews ---------------- */
+{
+  assert(typeof NPC.atOutpost === 'function', 'NPC.atOutpost exists');
+  const KINDS = ['homestead', 'relay', 'prospector camp', 'crashed ship'];
+  const NAMES = ['Pale Hold', 'Dust Chapel', 'The Long Static', 'Marrow Flats'];
+  let allDet = true, allShaped = true, allClean = true;
+  for (const name of NAMES) {
+    for (const kind of KINDS) {
+      const a = NPC.atOutpost(name, kind);
+      const b = NPC.atOutpost(name, kind);
+      if (JSON.stringify(a) !== JSON.stringify(b)) allDet = false;
+      if (!Array.isArray(a) || a.length < 1) allShaped = false;
+      for (const npc of a) {
+        if (!clean(npc.name) || !clean(npc.species) || !clean(npc.role)) allShaped = false;
+        const good = Array.isArray(npc.lines) && npc.lines.filter(clean).length >= 2;
+        if (!good) allShaped = false;
+        if (!(npc.portraitColorIdx >= 0 && npc.portraitColorIdx <= 17)) allShaped = false;
+        if (!clean(NPC.greeting(npc)) || !clean(NPC.farewell(npc))) allClean = false;
+      }
+    }
+  }
+  assert(allDet, 'atOutpost is deterministic per (name, kind)');
+  assert(allShaped, 'outpost NPCs are well-shaped (name/species/role/>=2 lines/color 0-17)');
+  assert(allClean, 'outpost greeting/farewell are clean non-empty strings');
+  // different kind at the same name yields a different crew
+  assert(JSON.stringify(NPC.atOutpost('Pale Hold', 'relay')) !==
+         JSON.stringify(NPC.atOutpost('Pale Hold', 'crashed ship')),
+    'outpost crew differs by kind');
+  // the station API is untouched
+  assert(Array.isArray(NPC.atLandmark('Sol')) && NPC.atLandmark('Sol').length > 0,
+    'station atLandmark still works');
+
+  console.log('\n  sample outpost — Pale Hold (crashed ship):');
+  for (const npc of NPC.atOutpost('Pale Hold', 'crashed ship')) {
+    console.log('    [' + String(npc.portraitColorIdx).padStart(2) + '] ' + npc.name +
+      ' — ' + npc.species + ' ' + npc.role);
+    console.log('         greet : ' + NPC.greeting(npc));
+  }
+}
+
 if (!failed) console.log('ALL TESTS PASSED');
 process.exit(failed ? 1 : 0);

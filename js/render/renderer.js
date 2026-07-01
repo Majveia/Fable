@@ -787,6 +787,84 @@ void main() {
       gl.bindVertexArray(null);
     }
 
+    // ---- (2b) PROPS: flora / rocks / outpost structures (v13 LIVING WORLDS) ----
+    // Same 9-float interleaved layout + shader as the terrain, drawn after it
+    // so it depth-tests against the ground (and the ship overlay, drawn later,
+    // occludes against both). Reuses surfMeshProg/Vao/Vbo/scratch sequentially.
+    const pm = surf.propMesh;
+    if (pm && surfMeshProg && pm.tris && pm.tris.length >= 9 &&
+        pm.norms && pm.norms.length === pm.tris.length &&
+        pm.triColor && pm.triColor.length * 3 === pm.tris.length) {
+      const nVerts = pm.tris.length / 3;
+      const nTri = pm.tris.length / 9;
+      const floats = nVerts * 9;
+      if (surfMeshScratch.length < floats) {
+        surfMeshScratch = new Float32Array(Math.max(floats, surfMeshScratch.length * 2));
+      }
+      const S = surfMeshScratch;
+      for (let t = 0; t < nTri; t++) {
+        const cr = pm.triColor[t * 3], cg = pm.triColor[t * 3 + 1], cb = pm.triColor[t * 3 + 2];
+        for (let j = 0; j < 3; j++) {
+          const vi = t * 3 + j, pi = vi * 3, oi = vi * 9;
+          S[oi]     = pm.tris[pi];  S[oi + 1] = pm.tris[pi + 1];  S[oi + 2] = pm.tris[pi + 2];
+          S[oi + 3] = pm.norms[pi]; S[oi + 4] = pm.norms[pi + 1]; S[oi + 5] = pm.norms[pi + 2];
+          S[oi + 6] = cr;           S[oi + 7] = cg;               S[oi + 8] = cb;
+        }
+      }
+      ensureSurfMeshCapacity(floats);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+      gl.useProgram(surfMeshProg);
+      gl.uniformMatrix4fv(uniSM.viewProj, false, viewProj);
+      gl.uniform3f(uniSM.eye, eye.x, eye.y, eye.z);
+      gl.uniform3f(uniSM.lightDir, ld[0], ld[1], ld[2]);
+      gl.uniform3f(uniSM.sunColor, sunColor[0], sunColor[1], sunColor[2]);
+      gl.uniform1f(uniSM.ambient, ambient);
+      gl.uniform3f(uniSM.fog, fog[0], fog[1], fog[2]);
+      gl.uniform1f(uniSM.fogDensity, fogDensity);
+      gl.bindVertexArray(surfMeshVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, surfMeshVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, S, 0, floats);
+      gl.drawArrays(gl.TRIANGLES, 0, nVerts);
+      gl.bindVertexArray(null);
+    }
+
+    // ---- (2c) WATER: a flat lit sea plane at water.level (v13; ocean worlds) ----
+    const water = surf.water;
+    if (water && water.present && surfMeshProg) {
+      const L = +water.level || 0;
+      const E = surf.extent || 1200;
+      const wc = water.color || [0.1, 0.34, 0.5];
+      const quad = new Float32Array([
+        -E, L, -E, 0, 1, 0, wc[0], wc[1], wc[2],
+         E, L, -E, 0, 1, 0, wc[0], wc[1], wc[2],
+         E, L,  E, 0, 1, 0, wc[0], wc[1], wc[2],
+        -E, L, -E, 0, 1, 0, wc[0], wc[1], wc[2],
+         E, L,  E, 0, 1, 0, wc[0], wc[1], wc[2],
+        -E, L,  E, 0, 1, 0, wc[0], wc[1], wc[2],
+      ]);
+      ensureSurfMeshCapacity(quad.length);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+      gl.useProgram(surfMeshProg);
+      gl.uniformMatrix4fv(uniSM.viewProj, false, viewProj);
+      gl.uniform3f(uniSM.eye, eye.x, eye.y, eye.z);
+      gl.uniform3f(uniSM.lightDir, ld[0], ld[1], ld[2]);
+      gl.uniform3f(uniSM.sunColor, sunColor[0], sunColor[1], sunColor[2]);
+      gl.uniform1f(uniSM.ambient, Math.min(1, ambient + 0.15));  // sea reads a touch brighter
+      gl.uniform3f(uniSM.fog, fog[0], fog[1], fog[2]);
+      gl.uniform1f(uniSM.fogDensity, fogDensity);
+      gl.bindVertexArray(surfMeshVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, surfMeshVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, quad, 0, quad.length);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.bindVertexArray(null);
+    }
+
     // ---- (3) MARKERS: additive point sprites (reuse ovlPtProg) ----
     const markers = surf.markers;
     if (ovlPtProg && markers && markers.length > 0) {

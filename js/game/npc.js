@@ -351,6 +351,9 @@
     station: [3, 5, 4, 3, 2, 1, 4],
     galaxy:  [2, 2, 2, 1, 3, 5, 2],
     system:  [4, 4, 3, 3, 3, 2, 3],
+    // v13: frontier planet OUTPOSTS — prospectors/mechanics, hermits (mystic),
+    // fugitives lying low, the odd fixer. Fewer brokers, almost no bar crowd.
+    outpost: [2, 3, 4, 1, 4, 4, 5],
     default: [3, 3, 3, 3, 3, 2, 3],
   };
 
@@ -446,6 +449,32 @@
 
       const roster = [];
       for (let i = 0; i < n; i++) roster.push(buildNPC(key, i, venue));
+      return roster;
+    },
+
+    /* atOutpost(nameOrId, kind, count) -> NPC[]  (v13 LIVING WORLDS)
+       The frontier souls at a planet-surface outpost — lonelier crews than a
+       station (default 1..3), biased toward prospectors/mechanics, hermits and
+       fugitives. Deterministic per (name, kind): the same outpost always holds
+       the same people. `kind` (homestead|relay|prospector camp|crashed ship)
+       folds into the key so a relay and a wreck at the same name differ. */
+    atOutpost(nameOrId, kind, count) {
+      const base = (nameOrId === undefined || nameOrId === null || nameOrId === '')
+        ? 'lonely-outpost' : String(nameOrId);
+      const key = base + (kind ? ' :: ' + String(kind) : '');
+      let n;
+      if (typeof count === 'number' && isFinite(count)) {
+        n = Math.max(1, Math.min(8, count | 0));
+      } else {
+        const nrng = rngFor(key, 'npc-count');
+        n = int(nrng, 1, 3);
+      }
+      const roster = [];
+      for (let i = 0; i < n; i++) {
+        const npc = buildNPC(key, i, 'outpost');
+        npc.outpostKind = kind ? String(kind) : '';
+        roster.push(npc);
+      }
       return roster;
     },
 

@@ -196,6 +196,353 @@
     return [v[0] / l, v[1] / l, v[2] / l];
   }
 
+  // ===========================================================================
+  // v13 LIVING WORLDS — biome / flora / rock / outpost helpers. All DOM-free,
+  // all deterministic from the seed (no Math.random). The flora & structures
+  // are baked as flat-shaded vertex-coloured triangles into ONE propMesh buffer
+  // (same 9-float layout as the terrain mesh) so the renderer draws them with
+  // the terrain shader in a single pass. Emissive channels (>1) are allowed for
+  // bioluminescent flora and outpost lights.
+  // ===========================================================================
+
+  // Gielis superformula radius for angle phi (the cheap "alien silhouette" eqn
+  // NMS uses). Sweep phi 0..2PI for a closed organic profile.
+  function superRadius(phi, m, n1, n2, n3) {
+    const t1 = Math.pow(Math.abs(Math.cos(m * phi / 4)), n2);
+    const t2 = Math.pow(Math.abs(Math.sin(m * phi / 4)), n3);
+    let r = Math.pow(t1 + t2, -1 / n1);
+    if (!isFinite(r)) r = 0;
+    return r;
+  }
+
+  // Deterministic per-cell hash -> [0,1). Stable for (i,j,salt+seed).
+  function hash2i(i, j, s) {
+    let h = (Math.imul(i | 0, 374761393) ^ Math.imul(j | 0, 668265263) ^ (s | 0)) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+  }
+
+  // A tiny triangle-soup builder: accumulates verts/normals/colors then bakes a
+  // single {tris,norms,triColor} on demand. Triangles are pushed in SURFACE
+  // SPACE with face normals computed from the winding (forced up/out-ish only
+  // when flagged for ground props).
+  function makeSoup() {
+    const T = [], NM = [], C = [];
+    function pushTri(ax, ay, az, bx, by, bz, cx, cy, cz, col) {
+      const ux = bx - ax, uy = by - ay, uz = bz - az;
+      const wx = cx - ax, wy = cy - ay, wz = cz - az;
+      let nx = uy * wz - uz * wy;
+      let ny = uz * wx - ux * wz;
+      let nz = ux * wy - uy * wx;
+      const l = Math.hypot(nx, ny, nz) || 1;
+      nx /= l; ny /= l; nz /= l;
+      T.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+      NM.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+      C.push(col[0], col[1], col[2]);
+    }
+    // a quad (a,b,c,d) -> two tris, both sharing the quad's vertex colour.
+    function pushQuad(a, b, c, d, col) {
+      pushTri(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], col);
+      pushTri(a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2], col);
+    }
+    return {
+      pushTri, pushQuad,
+      get triCount() { return C.length; },
+      bake() {
+        return {
+          tris: Float32Array.from(T),
+          norms: Float32Array.from(NM),
+          triColor: Float32Array.from(C),
+        };
+      },
+    };
+  }
+
+  // A vertical n-gon prism/cylinder/cone from (cx,baseY,cz) up by `h`, bottom
+  // radius r0, top radius r1 (0 => cone), `sides` faces, rotated by rot, with an
+  // optional lean (radians toward +x). Colour `col` for sides, `capCol` (or col)
+  // for the top cap. Triangles pushed into the soup.
+  function bakeCyl(S, cx, baseY, cz, h, r0, r1, sides, rot, lean, col, capCol) {
+    capCol = capCol || col;
+    const leanX = Math.sin(lean) * h, ringTopY = baseY + Math.cos(lean) * h;
+    const ring0 = [], ring1 = [];
+    for (let s = 0; s < sides; s++) {
+      const a = rot + (s / sides) * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      ring0.push([cx + ca * r0, baseY, cz + sa * r0]);
+      ring1.push([cx + ca * r1 + leanX, ringTopY, cz + sa * r1]);
+    }
+    for (let s = 0; s < sides; s++) {
+      const n = (s + 1) % sides;
+      if (r1 > 1e-4) {
+        S.pushQuad(ring0[s], ring1[s], ring1[n], ring0[n], col);
+      } else {
+        const tip = [cx + leanX, ringTopY, cz];
+        S.pushTri(ring0[s][0], ring0[s][1], ring0[s][2], tip[0], tip[1], tip[2], ring0[n][0], ring0[n][1], ring0[n][2], col);
+      }
+    }
+    // top cap fan (only if it has area)
+    if (r1 > 1e-4) {
+      const cTop = [cx + leanX, ringTopY, cz];
+      for (let s = 0; s < sides; s++) {
+        const n = (s + 1) % sides;
+        S.pushTri(cTop[0], cTop[1], cTop[2], ring1[s][0], ring1[s][1], ring1[s][2], ring1[n][0], ring1[n][1], ring1[n][2], capCol);
+      }
+    }
+  }
+
+  // An axis-aligned box centred at (cx,cy,cz) with half-extents (hx,hy,hz),
+  // colour col. Optionally `litFaces` (array of 6 bools, +x -x +y -y +z -z) swap
+  // to `litCol` for emissive accents.
+  function bakeBox(S, cx, cy, cz, hx, hy, hz, col, litCol, litFaces) {
+    const x0 = cx - hx, x1 = cx + hx, y0 = cy - hy, y1 = cy + hy, z0 = cz - hz, z1 = cz + hz;
+    const v = [
+      [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+      [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+    ];
+    const faces = [
+      [1, 5, 6, 2], // +x
+      [4, 0, 3, 7], // -x
+      [3, 2, 6, 7], // +y
+      [4, 5, 1, 0], // -y
+      [5, 4, 7, 6], // +z
+      [0, 1, 2, 3], // -z
+    ];
+    for (let f = 0; f < 6; f++) {
+      const c = (litFaces && litFaces[f]) ? litCol : col;
+      const fc = faces[f];
+      S.pushQuad(v[fc[0]], v[fc[1]], v[fc[2]], v[fc[3]], c);
+    }
+  }
+
+  // A faceted boulder: a low icosa-ish blob approximated by a jittered n-gon
+  // bipyramid. Cheap (~2*sides tris) and reads as faceted basalt when flat-shaded.
+  function bakeRock(S, cx, baseY, cz, r, h, sides, hashFn, col) {
+    const ring = [];
+    for (let s = 0; s < sides; s++) {
+      const a = (s / sides) * Math.PI * 2;
+      const jr = r * (0.7 + 0.6 * hashFn(s, 0));
+      const jy = baseY + h * 0.4 * (0.4 + 0.6 * hashFn(s, 1));
+      ring.push([cx + Math.cos(a) * jr, jy, cz + Math.sin(a) * jr]);
+    }
+    const top = [cx + (hashFn(99, 2) - 0.5) * r * 0.4, baseY + h * (0.8 + 0.4 * hashFn(99, 3)), cz + (hashFn(99, 4) - 0.5) * r * 0.4];
+    const bot = [cx, baseY - h * 0.15, cz];
+    for (let s = 0; s < sides; s++) {
+      const n = (s + 1) % sides;
+      S.pushTri(ring[s][0], ring[s][1], ring[s][2], top[0], top[1], top[2], ring[n][0], ring[n][1], ring[n][2], col);
+      S.pushTri(ring[s][0], ring[s][1], ring[s][2], ring[n][0], ring[n][1], ring[n][2], bot[0], bot[1], bot[2], col);
+    }
+  }
+
+  // ---- biome palettes (sRGB-ish 0..1; ground/rock/flora/accent). Accent may be
+  // emissive for bioluminescent / toxic biomes. Anchored to real-planet colours.
+  function rgb(r, g, b) { return [r / 255, g / 255, b / 255]; }
+  const BIOMES = {
+    verdant:  { ground: rgb(78, 102, 54),  rock: rgb(96, 92, 84),   flora: rgb(60, 140, 70),  accent: rgb(180, 220, 120), kind: 'tree',    emis: 0.0 },
+    desert:   { ground: rgb(178, 126, 72), rock: rgb(150, 96, 58),  flora: rgb(150, 120, 60), accent: rgb(220, 180, 90),  kind: 'crystal', emis: 0.0 },
+    crimson:  { ground: rgb(120, 40, 48),  rock: rgb(80, 30, 40),   flora: rgb(200, 40, 70),  accent: rgb(255, 90, 120),  kind: 'frond',   emis: 0.6 },
+    toxic:    { ground: rgb(40, 90, 84),   rock: rgb(34, 60, 62),   flora: rgb(40, 200, 170), accent: rgb(120, 255, 210), kind: 'crystal', emis: 1.6 },
+    ice:      { ground: rgb(210, 224, 235),rock: rgb(150, 165, 180),flora: rgb(150, 195, 220),accent: rgb(200, 240, 255), kind: 'crystal', emis: 0.2 },
+    barren:   { ground: rgb(120, 118, 114),rock: rgb(88, 86, 84),   flora: rgb(100, 100, 96), accent: rgb(160, 160, 158), kind: 'rock',    emis: 0.0 },
+    volcanic: { ground: rgb(58, 56, 60),   rock: rgb(40, 40, 46),   flora: rgb(90, 80, 90),   accent: rgb(255, 110, 40),  kind: 'crystal', emis: 1.8 },
+  };
+
+  // archetype -> dominant biome key + flora base density + weather + atmosphere.
+  // Kept aligned to the existing ARCHETYPES look so worlds still read the same.
+  const ARCH_LIVING = {
+    rocky:  { biome: 'verdant',  density: 0.34, weather: { kind: 'none', density: 0.0,  color: rgb(200, 200, 200), wind: [0.2, 0.1] },
+              atmosphere: { rayleigh: rgb(90, 130, 200),  mie: 0.012, sunIntensity: 1.0, nightTint: rgb(20, 26, 44) }, water: false },
+    lava:   { biome: 'volcanic', density: 0.16, weather: { kind: 'ash',  density: 0.55, color: rgb(60, 40, 36),    wind: [0.4, 0.2] },
+              atmosphere: { rayleigh: rgb(150, 50, 36),   mie: 0.05,  sunIntensity: 0.8, nightTint: rgb(40, 10, 8) },  water: false },
+    ice:    { biome: 'ice',      density: 0.10, weather: { kind: 'snow', density: 0.6,  color: rgb(235, 245, 255), wind: [0.3, -0.2] },
+              atmosphere: { rayleigh: rgb(150, 180, 220), mie: 0.02,  sunIntensity: 0.9, nightTint: rgb(30, 40, 60) }, water: false },
+    desert: { biome: 'desert',   density: 0.14, weather: { kind: 'dust', density: 0.5,  color: rgb(210, 170, 110), wind: [0.6, 0.3] },
+              atmosphere: { rayleigh: rgb(180, 130, 80),  mie: 0.03,  sunIntensity: 1.1, nightTint: rgb(40, 30, 22) }, water: false },
+    ocean:  { biome: 'verdant',  density: 0.30, weather: { kind: 'rain', density: 0.4,  color: rgb(140, 160, 180), wind: [0.3, 0.4] },
+              atmosphere: { rayleigh: rgb(80, 140, 210),  mie: 0.015, sunIntensity: 1.0, nightTint: rgb(16, 24, 40) }, water: true },
+    gas:    { biome: 'toxic',    density: 0.18, weather: { kind: 'none', density: 0.0,  color: rgb(200, 190, 210), wind: [0.5, 0.3] },
+              atmosphere: { rayleigh: rgb(160, 140, 180), mie: 0.06,  sunIntensity: 0.7, nightTint: rgb(36, 30, 48) }, water: false },
+    barren: { biome: 'barren',   density: 0.05, weather: { kind: 'none', density: 0.0,  color: rgb(150, 150, 150), wind: [0.1, 0.1] },
+              atmosphere: { rayleigh: rgb(60, 60, 70),    mie: 0.005, sunIntensity: 1.0, nightTint: rgb(6, 6, 10) },   water: false },
+  };
+
+  // A deterministic outpost name from a seed (so NPC.atLandmark(name) -> crew).
+  const OUTPOST_PREFIX = ['Halcyon', 'Drift', 'Cinder', 'Verge', 'Solace', 'Tycho', 'Marrow', 'Kestrel', 'Ardent', 'Pale', 'Hollow', 'Veil', 'Ember', 'Wren', 'Calder', 'Mire'];
+  const OUTPOST_SUFFIX = ['Station', 'Outpost', 'Reach', 'Hold', 'Landing', 'Post', 'Camp', 'Watch', 'Refuge', 'Claim'];
+  function outpostName(rng) {
+    const p = OUTPOST_PREFIX[(rng() * OUTPOST_PREFIX.length) | 0];
+    const s = OUTPOST_SUFFIX[(rng() * OUTPOST_SUFFIX.length) | 0];
+    return p + ' ' + s;
+  }
+  const OUTPOST_KINDS = ['homestead', 'relay', 'prospector camp', 'crashed ship'];
+
+  // Apply emissive scaling + a small hue jitter to a biome colour.
+  function floraColor(base, emis, jitter) {
+    const e = 1 + emis;
+    return [
+      Math.max(0, base[0] * e * (1 + jitter)),
+      Math.max(0, base[1] * e * (1 + jitter)),
+      Math.max(0, base[2] * e * (1 + jitter)),
+    ];
+  }
+
+  // Bake ONE flora/rock instance at (x,gy,z). Shape chosen by biome.kind, with
+  // per-instance variation from the cell hash. All deterministic.
+  function bakeFlora(S, x, gy, z, ix, iz, seed, biome) {
+    const h = (k) => hash2i(ix, iz, seed + 10 + k); // local hashes
+    const scale = 0.7 + h(0) * 1.6;
+    const rot = h(1) * Math.PI * 2;
+    const jit = (h(2) - 0.5) * 0.18;
+    const kind = biome.kind;
+
+    if (kind === 'tree') {
+      // parametric tree/mushroom: cylinder trunk + superformula canopy.
+      const hgt = (5 + h(3) * 7) * scale;
+      const trunkCol = [biome.flora[0] * 0.45, biome.flora[1] * 0.4, biome.flora[2] * 0.4];
+      bakeCyl(S, x, gy, z, hgt * 0.6, 0.5 * scale, 0.35 * scale, 5, rot, 0, trunkCol);
+      // canopy: superformula lathe cap as a 1-ring n-gon disk pushed up + a low
+      // cone for volume.
+      const capCol = floraColor(biome.flora, 0.0, jit);
+      const accCol = floraColor(biome.accent, biome.emis, jit);
+      const cy = gy + hgt * 0.6;
+      const segs = 8;
+      const ring = [];
+      for (let s = 0; s < segs; s++) {
+        const phi = (s / segs) * Math.PI * 2;
+        const rad = (2.2 + h(4) * 1.6) * scale * (0.6 + 0.6 * superRadius(phi, 6, 1, 1, 1));
+        ring.push([x + Math.cos(phi + rot) * rad, cy, z + Math.sin(phi + rot) * rad]);
+      }
+      const tip = [x, cy + (2.5 + h(5) * 2) * scale, z];
+      for (let s = 0; s < segs; s++) {
+        const n = (s + 1) % segs;
+        S.pushTri(ring[s][0], ring[s][1], ring[s][2], tip[0], tip[1], tip[2], ring[n][0], ring[n][1], ring[n][2], capCol);
+        S.pushTri(ring[s][0], ring[s][1], ring[s][2], ring[n][0], ring[n][1], ring[n][2], x, cy - 0.6 * scale, z, accCol);
+      }
+      return;
+    }
+
+    if (kind === 'crystal') {
+      // 2..4 tapered prisms leaning out from a shared base — emissive accent.
+      const n = 2 + ((h(3) * 3) | 0);
+      const col = floraColor(biome.flora, biome.emis * 0.3, jit);
+      const tipCol = floraColor(biome.accent, biome.emis, jit);
+      for (let k = 0; k < n; k++) {
+        const a = rot + (k / n) * Math.PI * 2 + h(6 + k) * 0.6;
+        const off = (0.4 + h(7 + k) * 1.2) * scale;
+        const cx = x + Math.cos(a) * off, cz = z + Math.sin(a) * off;
+        const ch = (2.5 + h(8 + k) * 4.5) * scale;
+        const lean = (h(9 + k) - 0.5) * 0.5;
+        bakeCyl(S, cx, gy, cz, ch, (0.5 + h(10 + k) * 0.5) * scale, 0, 5, a, lean, col, tipCol);
+      }
+      return;
+    }
+
+    if (kind === 'frond') {
+      // cross-quad fronds: 3 intersecting vertical cards, bottom dark -> top glow.
+      const n = 3;
+      const ch = (3 + h(3) * 5) * scale;
+      const w = (0.8 + h(4) * 0.8) * scale;
+      const lowCol = floraColor(biome.flora, 0.0, jit);
+      const topCol = floraColor(biome.accent, biome.emis, jit);
+      for (let k = 0; k < n; k++) {
+        const a = rot + (k / n) * Math.PI;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const bend = (0.4 + h(5 + k) * 0.4) * w;
+        const a0 = [x - ca * w, gy, z - sa * w];
+        const b0 = [x + ca * w, gy, z + sa * w];
+        const a1 = [x - ca * w * 0.3 + bend, gy + ch, z - sa * w * 0.3];
+        const b1 = [x + ca * w * 0.3 + bend, gy + ch, z + sa * w * 0.3];
+        // gradient: emit as two tris, bottom uses lowCol, top uses topCol.
+        S.pushTri(a0[0], a0[1], a0[2], b0[0], b0[1], b0[2], b1[0], b1[1], b1[2], lowCol);
+        S.pushTri(a0[0], a0[1], a0[2], b1[0], b1[1], b1[2], a1[0], a1[1], a1[2], topCol);
+      }
+      return;
+    }
+
+    // default: rock / boulder (barren & fallback).
+    const rr = (1.2 + h(3) * 2.4) * scale;
+    const rh = (1.0 + h(4) * 2.0) * scale;
+    const col = floraColor(biome.rock, 0.0, jit * 0.5);
+    bakeRock(S, x, gy, z, rr, rh, 6, (a, b) => hash2i(ix * 7 + a, iz * 7 + b, seed + 20), col);
+  }
+
+  // Bake one outpost structure: landing pad + dome habitat + antenna, plus a
+  // couple of cargo boxes and emissive lights, all snapped to the terrain at
+  // (x,gy,z). Variation by kind. Deterministic via the passed rng.
+  function bakeOutpost(S, x, gy, z, yaw, kind, rng, biome) {
+    const cy = Math.cos(yaw), sy = Math.sin(yaw);
+    // local-to-world helper (offset in the outpost's facing frame, y is up).
+    function L(ox, oy, oz) {
+      return [x + ox * cy - oz * sy, gy + oy, z + ox * sy + oz * cy];
+    }
+    const pad = [0.36, 0.37, 0.4];
+    const hull = [0.6, 0.62, 0.65];
+    const lit = [0.5, 1.4, 2.4];      // emissive blue window/light
+    const mark = [2.6, 1.8, 0.4];     // emissive amber rim marker
+    const blink = [2.6, 0.3, 0.2];    // emissive red antenna blink
+    const cargoCol = [0.7, 0.55, 0.25];
+
+    // LANDING PAD — wide low octagonal cylinder.
+    const pc = L(0, 0.3, 0);
+    bakeCyl(S, pc[0], gy, pc[2], 0.6, 7, 6.6, 8, yaw, 0, pad, pad);
+    // rim markers (emissive) around the pad.
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const m = L(Math.cos(a) * 6.4, 0.7, Math.sin(a) * 6.4);
+      bakeBox(S, m[0], m[1], m[2], 0.35, 0.25, 0.35, mark);
+    }
+
+    if (kind === 'crashed ship') {
+      // tilted hull cylinder + scattered debris boxes + an emissive breach.
+      const hb = L(0, 2.2, 2);
+      bakeCyl(S, hb[0], gy + 1.0, hb[2], 9, 2.4, 1.6, 7, yaw + 0.3, 0.9, hull, hull);
+      const br = L(1.5, 3.5, 3);
+      bakeBox(S, br[0], br[1], br[2], 0.9, 0.9, 0.9, hull, lit, [true, false, true, false, true, false]);
+      for (let i = 0; i < 4; i++) {
+        const dx = (rng() * 2 - 1) * 7, dz = (rng() * 2 - 1) * 7;
+        const d = L(dx, 0.6, dz);
+        bakeBox(S, d[0], d[1], d[2], 0.6 + rng() * 0.5, 0.5, 0.6 + rng() * 0.5, cargoCol);
+      }
+      return;
+    }
+
+    // DOME HABITAT — short cylinder ring + a low cap dome on top.
+    const dome = L(0, 0.6, 0);
+    bakeCyl(S, dome[0], gy + 0.6, dome[2], 2.2, 3.0, 2.8, 8, yaw, 0, hull, hull);
+    // dome cap (cone-ish) on top.
+    const cap = L(0, 2.8, 0);
+    bakeCyl(S, cap[0], gy + 2.8, cap[2], 2.4, 2.8, 0.4, 8, yaw, 0, hull, hull);
+    // emissive windows on the ring.
+    for (let i = 0; i < 4; i++) {
+      const a = yaw + (i / 4) * Math.PI * 2;
+      const w = L(Math.cos(a - yaw) * 3.0, 1.6, Math.sin(a - yaw) * 3.0);
+      bakeBox(S, w[0], w[1], w[2], 0.5, 0.5, 0.2, lit, lit, [true, true, true, true, true, true]);
+    }
+
+    if (kind === 'relay') {
+      // tall antenna mast + dish housing + blink lights.
+      const mast = L(4, 0, 0);
+      bakeCyl(S, mast[0], gy, mast[2], 11, 0.3, 0.18, 5, yaw, 0, hull, hull);
+      const dish = L(4, 11, 0);
+      bakeBox(S, dish[0], dish[1], dish[2], 0.8, 0.8, 0.8, hull);
+      const bl = L(4, 12, 0);
+      bakeBox(S, bl[0], bl[1], bl[2], 0.3, 0.3, 0.3, blink, blink, [true, true, true, true, true, true]);
+    } else {
+      // homestead / prospector camp: a couple of cargo containers + a short mast.
+      const nC = 2 + ((rng() * 2) | 0);
+      for (let i = 0; i < nC; i++) {
+        const a = (i / nC) * Math.PI * 2;
+        const c = L(Math.cos(a) * 4.5, 0.8, Math.sin(a) * 4.5);
+        bakeBox(S, c[0], c[1], c[2], 1.0, 0.8, 0.6, cargoCol, mark, [true, false, false, false, false, false]);
+      }
+      const mast = L(-3.5, 0, 1);
+      bakeCyl(S, mast[0], gy, mast[2], 6, 0.22, 0.14, 5, yaw, 0, hull, hull);
+      const bl = L(-3.5, 6, 1);
+      bakeBox(S, bl[0], bl[1], bl[2], 0.25, 0.25, 0.25, blink, blink, [true, true, true, true, true, true]);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // generate() — build the full Surface descriptor.
   // ---------------------------------------------------------------------------
@@ -452,6 +799,117 @@
       yaw: 0,
     };
 
+    // =========================================================================
+    // v13 LIVING WORLDS — water / weather / atmosphere / biome flora + outposts.
+    // All derived deterministically from the same seed (uses makeRng(rng) and
+    // the cell hash hash2i; no Math.random). Everything additive — the existing
+    // mesh/markers/sky/spawn/heightAt above are untouched.
+    // =========================================================================
+    const living = ARCH_LIVING[archetype] || ARCH_LIVING.rocky;
+    const biome = BIOMES[living.biome] || BIOMES.verdant;
+
+    // WATER — ocean worlds get a flat plane at the archetype waterLevel.
+    const water = (def.water && living.water)
+      ? { present: true, level: def.waterLevel || 0, color: (def.waterCol || [0.1, 0.34, 0.5]).slice() }
+      : { present: false, level: def.waterLevel || 0, color: (def.waterCol || [0.1, 0.34, 0.5]).slice() };
+
+    // WEATHER & ATMOSPHERE — per archetype (deep-copied so callers can't mutate
+    // the shared table).
+    const weather = {
+      kind: living.weather.kind,
+      density: living.weather.density,
+      color: living.weather.color.slice(),
+      wind: living.weather.wind.slice(),
+    };
+    const atmosphere = {
+      rayleigh: living.atmosphere.rayleigh.slice(),
+      mie: living.atmosphere.mie,
+      sunIntensity: living.atmosphere.sunIntensity,
+      nightTint: living.atmosphere.nightTint.slice(),
+    };
+
+    // Approximate slope (0 flat .. 1 steep) at (x,z) from the height gradient.
+    function slopeAt(x, z) {
+      const e = cell;
+      const hx = heightAt(x + e, z) - heightAt(x - e, z);
+      const hz = heightAt(x, z + e) - heightAt(x, z - e);
+      const g = Math.hypot(hx, hz) / (2 * e);
+      return clamp01(g); // |gradient| already ~0..1 for our amps/cell
+    }
+
+    // ---- OUTPOSTS: 1..3 on reasonably flat ground, baked as small structures
+    // into the prop soup. Each carries a deterministic name so NPC.atLandmark
+    // yields its crew. ----
+    const orng = makeRng((seed ^ 0x51ED7) >>> 0);
+    const soup = makeSoup();
+    const outposts = [];
+    const nOut = 1 + ((orng() * 3) | 0); // 1..3
+    let placed = 0, tries = 0;
+    while (placed < nOut && tries < 200) {
+      tries++;
+      const x = (orng() * 2 - 1) * extent * 0.7;
+      const z = (orng() * 2 - 1) * extent * 0.7;
+      const gy = heightAt(x, z);
+      // skip steep ground and (on ocean worlds) anything under/near water.
+      if (slopeAt(x, z) > 0.22) continue;
+      if (water.present && gy < water.level + 6) continue;
+      const yaw = orng() * Math.PI * 2;
+      const name = outpostName(orng);
+      const kind = OUTPOST_KINDS[(orng() * OUTPOST_KINDS.length) | 0];
+      bakeOutpost(soup, x, gy, z, yaw, kind, orng, biome);
+      outposts.push({ pos: [x, gy, z], yaw, kind, name });
+      placed++;
+    }
+    // guarantee at least one outpost even on pathologically steep worlds.
+    if (outposts.length === 0) {
+      const x = extent * 0.2, z = -extent * 0.15, gy = heightAt(x, z);
+      const yaw = orng() * Math.PI * 2;
+      const name = outpostName(orng);
+      const kind = OUTPOST_KINDS[(orng() * OUTPOST_KINDS.length) | 0];
+      bakeOutpost(soup, x, gy, z, yaw, kind, orng, biome);
+      outposts.push({ pos: [x, gy, z], yaw, kind, name });
+    }
+
+    // ---- FLORA + ROCKS: deterministic grid-jitter scatter, density gated by
+    // slope/height and clustered by a low-freq patch field. Baked into the same
+    // soup. Budget-capped so the single buffer stays performant. ----
+    {
+      const SCAT_GRID = 96;                 // scatter cells across the extent
+      const sc = (extent * 2) / SCAT_GRID;  // world units per scatter cell
+      const MAX_INSTANCES = 1600;
+      const baseDensity = living.density;
+      // avoid placing flora right on top of an outpost.
+      function nearOutpost(x, z) {
+        for (let i = 0; i < outposts.length; i++) {
+          const o = outposts[i].pos;
+          if (Math.hypot(x - o[0], z - o[2]) < 22) return true;
+        }
+        return false;
+      }
+      let count = 0;
+      for (let iz = 0; iz < SCAT_GRID && count < MAX_INSTANCES; iz++) {
+        for (let ix = 0; ix < SCAT_GRID && count < MAX_INSTANCES; ix++) {
+          const r = hash2i(ix, iz, seed);
+          // clustering: low-freq patch noise squared -> clumps with bare gaps.
+          const patch = noise.vnoise(ix * 0.10, iz * 0.10);
+          let d = baseDensity * (0.25 + patch * patch * 1.9);
+          if (r > d) continue;
+          // jitter inside the cell.
+          const x = -extent + (ix + hash2i(ix, iz, seed + 1)) * sc;
+          const z = -extent + (iz + hash2i(ix, iz, seed + 2)) * sc;
+          if (Math.abs(x) > extent || Math.abs(z) > extent) continue;
+          const gy = heightAt(x, z);
+          if (water.present && gy < water.level + 1.5) continue; // not in water
+          if (slopeAt(x, z) > 0.45) continue;                    // not on cliffs
+          if (nearOutpost(x, z)) continue;
+          bakeFlora(soup, x, gy, z, ix, iz, seed, biome);
+          count++;
+        }
+      }
+    }
+
+    const propMesh = soup.triCount > 0 ? soup.bake() : null;
+
     return {
       archetype,
       extent,
@@ -460,6 +918,12 @@
       sky,
       spawn,
       heightAt,
+      // ---- v13 LIVING WORLDS additive fields ----
+      propMesh,
+      water,
+      weather,
+      atmosphere,
+      outposts,
     };
   }
 

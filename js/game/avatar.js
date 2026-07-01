@@ -202,6 +202,122 @@
       // 'fp' (default): eyes at head height, looking along the look dir.
       return { pos: eye, forward: look, up: up };
     },
+
+    /* ========================================================
+       v13 LIVING WORLDS — walk a PLANET SURFACE on foot.
+       Same yaw/pitch/look convention as above, but here pos is in
+       SURFACE/WORLD space (+Y up), the FLOOR is the terrain height
+       heightAt(x,z) instead of ShipModel.bounds, and there is real
+       gravity so you step off ledges and rise up slopes. X/Z are
+       clamped to the playable square (+/- extent). The camera mount
+       is already in world space (no ship->local transform), so the
+       integrator can aim Camera3D straight from it.
+       ======================================================== */
+    _surfVy: 0,          // vertical velocity (gravity), surface only
+    _surfExtent: 1200,   // X/Z clamp
+
+    surfaceReset(opts) {
+      opts = opts || {};
+      const p = opts.pos || [0, 0, 0];
+      const s = this.state;
+      s.pos = [num(p[0]), num(p[1]), num(p[2])];
+      s.yaw = wrap(num(opts.yaw));
+      s.pitch = 0;
+      s.moving = false;
+      this._vel = [0, 0, 0];
+      this._surfVy = 0;
+      this._surfExtent = (opts.extent > 0 && isFinite(opts.extent)) ? +opts.extent : 1200;
+      return s;
+    },
+
+    /* updateOnSurface(dtSec, input, heightAt, extent)
+       input = { fwd, strafe, turn, lookPitch, run } like update().
+       Planar WASD in the facing frame with the same responsive accel/
+       damp; gravity pulls -Y and the terrain (heightAt) is the floor
+       so you fall off ledges and climb slopes; X/Z clamp to extent. */
+    updateOnSurface(dtSec, input, heightAt, extent) {
+      const dt = (dtSec > 0 && isFinite(dtSec)) ? Math.min(dtSec, 0.1) : 0;
+      input = input || {};
+      const s = this.state;
+      const ext = (extent > 0 && isFinite(extent)) ? +extent : this._surfExtent;
+      this._surfExtent = ext;
+      const ht = (typeof heightAt === 'function') ? heightAt : function () { return 0; };
+
+      // ---- 1) Orientation ----
+      const turn = clamp(num(input.turn), -1, 1);
+      const look = clamp(num(input.lookPitch), -1, 1);
+      s.yaw = wrap(s.yaw + turn * TURN_RATE * dt);
+      s.pitch = clamp(s.pitch + look * PITCH_RATE * dt, -PITCH_LIMIT, PITCH_LIMIT);
+
+      // ---- 2) Target planar velocity (a bit brisker on foot outdoors) ----
+      const SURF_WALK = 6.5, SURF_RUN = 1.75, SURF_GRAV = 22;
+      const fwdIn = clamp(num(input.fwd), -1, 1);
+      const strIn = clamp(num(input.strafe), -1, 1);
+      const cap = SURF_WALK * (input.run ? SURF_RUN : 1);
+      const F = fwdFrom(s.yaw), R = rightFrom(s.yaw);
+      let dx = F[0] * fwdIn + R[0] * strIn;
+      let dz = F[2] * fwdIn + R[2] * strIn;
+      const magIn = Math.min(1, Math.hypot(fwdIn, strIn));
+      const dl = Math.hypot(dx, dz);
+      let tgX = 0, tgZ = 0;
+      if (dl > 1e-9) { const k = (cap * magIn) / dl; tgX = dx * k; tgZ = dz * k; }
+
+      const rate = (magIn > 1e-6) ? ACCEL_HZ : DAMP_HZ;
+      const kk = 1 - Math.exp(-rate * dt);
+      const v = this._vel;
+      v[0] += (tgX - v[0]) * kk;
+      v[2] += (tgZ - v[2]) * kk;
+
+      // ---- 3) Integrate planar, clamp X/Z to the playable square ----
+      s.pos[0] = clamp(s.pos[0] + v[0] * dt, -ext, ext);
+      s.pos[2] = clamp(s.pos[2] + v[2] * dt, -ext, ext);
+
+      // ---- 4) Gravity + terrain floor: fall off ledges, rise up slopes ----
+      this._surfVy -= SURF_GRAV * dt;
+      s.pos[1] += this._surfVy * dt;
+      let ground = ht(s.pos[0], s.pos[2]);
+      if (!isFinite(ground)) ground = 0;
+      if (s.pos[1] <= ground) {
+        s.pos[1] = ground;                 // feet on the ground
+        if (this._surfVy < 0) this._surfVy = 0;
+      }
+
+      // ---- 5) NaN guard + moving flag ----
+      for (let i = 0; i < 3; i++) {
+        if (!isFinite(s.pos[i])) s.pos[i] = 0;
+        if (!isFinite(v[i])) v[i] = 0;
+      }
+      if (!isFinite(this._surfVy)) this._surfVy = 0;
+      s.moving = Math.hypot(v[0], v[2]) > MOVE_EPS;
+      return s;
+    },
+
+    /* surfaceMount(view, heightAt) -> { pos, forward, up } in WORLD space.
+       'fp' eyes at feet + EYE_HEIGHT looking along yaw+pitch; 'tp' behind
+       and above, kept clear of the terrain via heightAt. */
+    surfaceMount(view, heightAt) {
+      const s = this.state;
+      const up = [0, 1, 0];
+      const ht = (typeof heightAt === 'function') ? heightAt : function () { return -1e9; };
+      const eye = [s.pos[0], s.pos[1] + EYE_HEIGHT, s.pos[2]];
+      const look = lookFrom(s.yaw, s.pitch);
+
+      if (view === 'tp') {
+        const BACK = 7.0, UPP = 3.0;
+        const pos = [
+          eye[0] - look[0] * BACK,
+          eye[1] - look[1] * BACK + UPP,
+          eye[2] - look[2] * BACK,
+        ];
+        // Keep the chase eye above the terrain it hovers over.
+        const g = ht(pos[0], pos[2]);
+        if (isFinite(g) && pos[1] < g + 1.5) pos[1] = g + 1.5;
+        let fx = eye[0] - pos[0], fy = eye[1] - pos[1], fz = eye[2] - pos[2];
+        const fl = Math.hypot(fx, fy, fz) || 1;
+        return { pos: pos, forward: [fx / fl, fy / fl, fz / fl], up: up };
+      }
+      return { pos: eye, forward: look, up: up };
+    },
   };
 
   globalThis.Avatar = Avatar;
