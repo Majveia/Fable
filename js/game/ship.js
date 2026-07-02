@@ -208,9 +208,16 @@
       const tight   = mode === 'cockpit';
       // Third person pulled WAY back so you see the whole ship + its
       // surroundings; cockpit stays tight to the nose.
-      const dist    = (tight ? 12  : 150) * unit;   // boom length
-      const ahead   = (tight ? 5   : 30)  * unit;   // look-ahead along F
-      const lift    = (tight ? 1.2 : 34)  * unit;   // raise the target (world +Y)
+      // COCKPIT (FP) frames off the SHIP'S rendered world length — the same
+      // vr*0.03 rule main.js shipWorldLen() uses — NOT off `unit` (they
+      // diverge across nodes, which used to sink the eye INSIDE the hull so
+      // the dorsal deck filled the frame). Eye lands just above the canopy
+      // (hull top ≈ 0.16*len), slightly forward, so the nose reads as a
+      // dashboard wedge at the frame's bottom and the sky is clear.
+      const shipLen = clamp(this._viewRadius * 0.03, 8, 300);
+      const dist    = tight ? Math.max(shipLen * 0.05, 0.6) : 150 * unit; // boom length
+      const ahead   = tight ? shipLen * 0.36 : 30 * unit;   // look-ahead along F
+      const lift    = tight ? shipLen * 0.20 : 34 * unit;   // raise the target (world +Y)
 
       // Camera looks along +F: invert the camera's eye-offset relation.
       const camYaw   = wrap(s.yaw + Math.PI);

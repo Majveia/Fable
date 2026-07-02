@@ -57,6 +57,11 @@ const GALAXY_VIEW    = 1500, GALAXY_CAPTURE = 800;
 const SYSTEM_VIEW    = 1100, SYSTEM_CAPTURE = 90;
 const PLANET_VIEW    = 40,   PLANET_CAPTURE = 60;
 const GAL_DISK_R     = 900;  // populated galaxy disk radius (popGalaxy makeGalaxy)
+// Fixed galaxy-disk tilt from +Y (rad). Nonzero so azimuth = phase rigidly
+// rotates the disk (phase continuity), and STEEP enough (0.9 ~ 52 deg) that
+// the default orbit camera (pitch ~0.35) sees a THREE-QUARTER spiral, not an
+// edge-on band — tilt 0.35 put the disk exactly edge-on to that camera.
+const GAL_TILT = 0.9;
 const SYS_A0 = 60, SYS_DA = 105; // planet orbital radii: a_k = SYS_A0 + k*SYS_DA
 
 /* ---------------------------------------------------------------
@@ -203,10 +208,10 @@ function genSystems(gal) {
   const r = gal.rng();
   const rand = (a, b) => a + r() * (b - a);
 
-  // Match popGalaxy's disk plane (fixed tilt 0.35, azimuth 0 at phase 0) so
-  // the visitable systems sit AMONG the galaxy's visible stars (the populated
-  // disk has radius GAL_DISK_R), not in some unrelated plane.
-  const [nx, ny, nz] = B.unitNormalFromTilt(0.35, 0);
+  // Match popGalaxy's disk plane (fixed tilt GAL_TILT, azimuth 0 at phase 0)
+  // so the visitable systems sit AMONG the galaxy's visible stars (the
+  // populated disk has radius GAL_DISK_R), not in some unrelated plane.
+  const [nx, ny, nz] = B.unitNormalFromTilt(GAL_TILT, 0);
   const [ux, uy, uz, vx, vy, vz] = B.basisFor(nx, ny, nz);
 
   const kids = new Array(N_SYSTEMS);
@@ -429,14 +434,17 @@ function popGalaxy(node, budget, out) {
   // disk. So azimuthRad = GAL_TILT_AZ_BASE + node.phase makes a galaxy
   // re-entered at phase=pi land half a turn around vs phase=0, keeping
   // re-entry after analytic aging continuous. (A face-on tilt=0 disk would
-  // be azimuth-invariant, so we use a fixed small tilt.)
+  // be azimuth-invariant, so we use the fixed GAL_TILT.)
+  // v13 STRUCTURE: more, smaller gas sprites (arm knots + fringe inside
+  // makeGalaxy) and slightly less dust so arms/lanes/bulge read as a
+  // coloured spiral instead of an additive white smear.
   B.makeGalaxy({
     cx: 0, cy: 0, cz: 0, cvx: 0, cvy: 0, cvz: 0,
     stars: g ? 12000 : 4600,
-    dust: g ? 128000 * X : 9000,
-    gas: g ? 6000 * Math.min(X, 2) : 900,
+    dust: g ? 110000 * X : 8400,
+    gas: g ? 9000 * Math.min(X, 2) : 1400,
     radius: 900, bhMass: 40000,
-    tiltRad: 0.35, azimuthRad: node.phase, spinDir: 1,
+    tiltRad: GAL_TILT, azimuthRad: node.phase, spinDir: 1,
   });
   return {
     cfg: { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 },

@@ -185,6 +185,8 @@
       tps:     [0.78, 0.78, 0.74],  // near-white ceramic TPS (235,235,228)
       tpsDk:   [0.50, 0.51, 0.50],  // shaded TPS / belly tile field
       tpsLt:   [0.88, 0.89, 0.86],  // sunlit upper TPS highlight
+      tpsMid:  [0.60, 0.61, 0.58],  // mid-tone TPS tile (panel checker step)
+      tpsCool: [0.71, 0.73, 0.72],  // cool-grey tile blanket (FRSI-ish)
       rcc:     [0.05, 0.05, 0.06],  // black RCC leading edge / nose cap (20,20,22)
       gunmetal:[0.16, 0.18, 0.20],  // gunmetal structure (84,88,94)
       gold:    [0.55, 0.40, 0.10],  // gold MLI foil (212,175,55)
@@ -200,20 +202,41 @@
       fin:     [0.74, 0.74, 0.71],  // tail fin TPS
       engine:  [0.34, 0.31, 0.27],  // engine block (inconel/ablative tan)
       nozzleMetal:[0.30, 0.27, 0.23], // inconel bell wall (150,140,130)
-      throat:  [2.40, 1.35, 0.55],  // glowing throat (255,180,90) HDR emissive
+      throat:  [1.60, 0.80, 0.30],  // glowing throat disk, warm HDR emissive
       bellMid: [0.55, 0.16, 0.07],  // hot mid-bell (120,40,20)
       bellLip: [0.07, 0.05, 0.05],  // dark cooled lip (25,20,20)
-      nozzle:  [2.40, 1.35, 0.55],  // legacy alias -> glowing throat
+      bellRim: [0.50, 0.47, 0.42],  // machined bell rim ring (visible from aft)
+      nozzle:  [1.60, 0.80, 0.30],  // legacy alias -> glowing throat
       canopy:  [0.04, 0.10, 0.14],  // tinted blue-green glass (30,45,55)
       rcsRim:  [0.03, 0.03, 0.03],  // black RCS thruster rim
       // interior materials (kept cohesive with the new livery)
       floor:   [0.20, 0.22, 0.24],
+      floorDk: [0.12, 0.14, 0.16],  // alternate deck plate (tone contrast)
       console: [0.22, 0.28, 0.34],
+      screen:  [0.20, 1.40, 1.60],  // emissive teal console screens (HDR)
+      cabin:   [0.52, 0.36, 0.18],  // warm cabin accent panels
+      strip:   [1.30, 1.20, 1.00],  // warm-white cabin light strip (HDR)
       seatMat: [0.28, 0.31, 0.36],
       crate:   [0.40, 0.31, 0.12],  // amber MLI-wrapped cargo
       bulkhd:  [0.24, 0.27, 0.31],
-      readout: [0.10, 0.45, 0.50],  // glowing cyan readout
+      readout: [0.20, 1.40, 1.60],  // glowing teal engine readout = screen
     };
+
+    // Direction-hinted flat triangle/quad: guarantees the face normal agrees
+    // with `want` by flipping the winding when needed. Used for surfaces whose
+    // visible side matters under the renderer's eye-facing interior culling
+    // (interior detail faces INTO the cabin; aft surfaces face AFT; etc).
+    function triD(a, b, c, want, color) {
+      const ux = b[0]-a[0], uy = b[1]-a[1], uz = b[2]-a[2];
+      const vx = c[0]-a[0], vy = c[1]-a[1], vz = c[2]-a[2];
+      const nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
+      if (nx*want[0] + ny*want[1] + nz*want[2] >= 0) M.tri(a, b, c, color);
+      else M.tri(a, c, b, color);
+    }
+    function quadD(a, b, c, d, want, color) {
+      triD(a, b, c, want, color);
+      triD(a, c, d, want, color);
+    }
 
     // === HULL OUTLINE =====================================================
     // The body is a faceted "diamond" cross-section (top/bottom ridge + side
@@ -253,6 +276,7 @@
       [-3.5, 1.72, 1.52], // aft fuselage
       [-5.5, 1.52, 1.42], // engine shoulders
       [-7.2, 1.34, 1.28], // engine deck
+      [-7.9, 1.12, 1.05], // boat-tail: sculpted taper into the engine bay
     ];
 
     const rings = PROFILE.map(p => ring(p[0], p[1], p[2]));
@@ -305,6 +329,24 @@
     // Ring hexagon vertex order (from ring()): 0 right-chine, 1 top-right,
     // 2 top-left, 3 left-chine, 4 bottom-left, 5 bottom-right. So facet index
     // k spans verts k..k+1: facet 1 = top deck (tr->tl), facets 4 & 5 = belly.
+    // Each ring-to-ring band is subdivided into z-SLICES and the tile tone is
+    // varied per slice with a deterministic hash so the upper hull reads as a
+    // fitted TPS tile field (Shuttle-orbiter feel) rather than one flat white
+    // slab. Belly/aft zones keep their darker soot/gunmetal treatment.
+    const SLICES = 3;
+    function lerp3v(p, q, t) {
+      return [p[0]+(q[0]-p[0])*t, p[1]+(q[1]-p[1])*t, p[2]+(q[2]-p[2])*t];
+    }
+    // Deterministic small hash -> 0..3 (independent of the decorative rng so
+    // the tile pattern is stable across seeds).
+    function tileHash(i, k, s) {
+      let h = (i * 73856093) ^ (k * 19349663) ^ (s * 83492791);
+      h = (h ^ (h >>> 13)) >>> 0;
+      return h % 4;
+    }
+    // tone tables: top deck sparkles lighter, sides checker around base TPS.
+    const TOP_TONES  = [MAT.tpsLt, MAT.tps, MAT.tpsLt, MAT.tpsMid];
+    const SIDE_TONES = [MAT.tps, MAT.tpsCool, MAT.tps, MAT.tpsMid];
     for (let i = 0; i < rings.length - 1; i++) {
       const a = rings[i], b = rings[i + 1];
       const an = ringVN[i], bn = ringVN[i + 1];
@@ -313,24 +355,33 @@
         const k2 = (k + 1) % a.length;
         // Material zones: belly facets (4,5) read as the darker tile field and
         // pick up soot toward the aft (re-entry/thrust heating); the top deck
-        // (facet 1) is sunlit TPS highlight; sides are clean TPS. Aft of the
-        // engine shoulders the whole girth darkens toward gunmetal/soot.
+        // (facet 1) is sunlit TPS with light tile variation; sides are TPS
+        // with a subtle panel checker. Aft of the engine shoulders the whole
+        // girth darkens toward gunmetal/soot.
         const belly = (k === 4 || k === 5);
-        let mat;
-        if (za < -4.5)      mat = belly ? MAT.soot : MAT.gunmetal;
-        else if (belly)     mat = (za < 0) ? MAT.soot : MAT.tpsDk;
-        else if (k === 1)   mat = MAT.tpsLt;     // top deck highlight
-        else                mat = MAT.tps;       // clean side TPS skin
-        // quad a[k] -> a[k2] -> b[k2] -> b[k], wound CCW from outside (nose
-        // ring index i is the more +Z / forward ring).
-        M.striz(a[k2], an[k2], a[k], an[k], b[k], bn[k], mat);
-        M.striz(a[k2], an[k2], b[k], bn[k], b[k2], bn[k2], mat);
+        for (let s = 0; s < SLICES; s++) {
+          const t0 = s / SLICES, t1 = (s + 1) / SLICES;
+          const pk0  = lerp3v(a[k],  b[k],  t0), pk1  = lerp3v(a[k],  b[k],  t1);
+          const pk20 = lerp3v(a[k2], b[k2], t0), pk21 = lerp3v(a[k2], b[k2], t1);
+          const nk0  = lerp3v(an[k],  bn[k],  t0), nk1  = lerp3v(an[k],  bn[k],  t1);
+          const nk20 = lerp3v(an[k2], bn[k2], t0), nk21 = lerp3v(an[k2], bn[k2], t1);
+          let mat;
+          if (za < -4.5)      mat = belly ? MAT.soot : MAT.gunmetal;
+          else if (belly)     mat = (za < 0) ? MAT.soot : MAT.tpsDk;
+          else if (k === 1)   mat = TOP_TONES[tileHash(i, k, s)];   // top deck tiles
+          else                mat = SIDE_TONES[tileHash(i, k, s)];  // side tile checker
+          // same winding as the original band quads (CCW from outside; ring i
+          // is the more +Z / forward ring), just sliced along z.
+          M.striz(pk20, nk20, pk0, nk0, pk1, nk1, mat);
+          M.striz(pk20, nk20, pk1, nk1, pk21, nk21, mat);
+        }
       }
     }
-    // Gold MLI foil accent: a crinkled foil band on the top deck over the
-    // forward fuselage (between cockpit shoulders and the wide body), a single
-    // grouped accent against the clean white skin per the 80/20 rule.
-    for (const i of [3]) {
+    // Gold MLI foil accents: a crinkled foil band on the top deck over the
+    // forward fuselage (between cockpit shoulders and the wide body), plus a
+    // second band on the boat-tail right by the engine bay — grouped accents
+    // against the clean white skin per the 80/20 rule.
+    for (const i of [3, rings.length - 2]) {
       const a = rings[i], b = rings[i + 1];
       const an = ringVN[i], bn = ringVN[i + 1];
       const mat = (i % 2 === 0) ? MAT.gold : MAT.goldDk;
@@ -499,39 +550,59 @@
     }
     fin(+1); fin(-1);
 
-    // === ENGINE BLOCK + BULKHEAD (-Z) =====================================
-    // Aft thrust structure: an inconel/ablative engine block, a gold-MLI-wrapped
-    // equipment bulkhead, and a 3-engine cluster (odd, symmetric) of Rao bell
-    // nozzles. Greebles (pipes / turbopump bulges) cluster here per the research
-    // 80/20 rule; the rest of the hull stays clean.
-    B.box([-1.7, -1.2, TAIL], [1.7, 1.2, -5.4]);
-    M.box([-1.7, -1.2, TAIL + 0.02], [1.7, 1.2, -5.4], MAT.engine);
-    // gold MLI foil equipment band wrapping the upper aft bulkhead.
-    M.box([-1.55, 0.55, TAIL + 0.05], [1.55, 1.18, -5.2], MAT.gold);
+    // === SCULPTED STERN: BOAT-TAIL CLOSURE + RECESSED ENGINE BAY (-Z) =====
+    // The fuselage rings themselves now taper into a boat-tail (last PROFILE
+    // row), so the stern is closed with a sculpted funnel: the aft ring steps
+    // inward/forward to a recessed engine-bay bulkhead, and the bell nozzles
+    // grow out of that bay. Greebles (turbopump housings / feed lines) cluster
+    // here per the research 80/20 rule; the rest of the hull stays clean.
+    const aftRing = rings[rings.length - 1];          // boat-tail ring @ z=-7.9
+    const AFT_Z = aftRing[0][2];
+    const BAY_Z = AFT_Z + 0.55;                       // recessed bay bulkhead
+    const bayRing = ring(BAY_Z, 1.12 * 0.76, 1.05 * 0.76);
+    // funnel annulus: boat-tail rim -> recessed bay ring (gunmetal, aft-facing)
+    for (let k = 0; k < aftRing.length; k++) {
+      const k2 = (k + 1) % aftRing.length;
+      // want: aft (-Z) with an outward radial tilt at the facet midpoint
+      const mx = (aftRing[k][0] + aftRing[k2][0]) * 0.5;
+      const my = (aftRing[k][1] + aftRing[k2][1]) * 0.5;
+      quadD(aftRing[k], aftRing[k2], bayRing[k2], bayRing[k],
+            [mx * 0.35, my * 0.35, -1], MAT.gunmetal);
+    }
+    // recessed bay bulkhead plate (sooted, aft-facing fan to the centre)
+    const bayC = [0, 0, BAY_Z];
+    for (let k = 0; k < bayRing.length; k++) {
+      const k2 = (k + 1) % bayRing.length;
+      triD(bayRing[k], bayRing[k2], bayC, [0, 0, -1], MAT.soot);
+    }
+    // crisp wireframe trim on the bay rim
+    B.loop(bayRing);
 
-    // turbopump bulges + plumbing greebles on the engine block (functional zone)
+    // turbopump housings + plumbing greebles tucked under the boat-tail
     for (const sx of [-1, 1]) {
-      M.box([sx*0.55 - 0.28, -1.15, -6.4], [sx*0.55 + 0.28, -0.55, -5.5], MAT.gunmetal);
-      B.box([sx*0.55 - 0.28, -1.15, -6.4], [sx*0.55 + 0.28, -0.55, -5.5]);
+      M.box([sx*0.55 - 0.26, -1.02, -6.6], [sx*0.55 + 0.26, -0.48, -5.6], MAT.gunmetal);
+      B.box([sx*0.55 - 0.26, -1.02, -6.6], [sx*0.55 + 0.26, -0.48, -5.6]);
     }
-    // a couple of fuel/ox feed lines running forward from the bulkhead.
+    // a couple of fuel/ox feed lines running forward from the bay
     for (const sx of [-0.9, 0.9]) {
-      B.path([[sx, -0.7, -5.4], [sx, -0.5, -4.6], [sx*0.7, -0.3, -3.8]]);
+      B.path([[sx, -0.7, -5.6], [sx, -0.5, -4.6], [sx*0.7, -0.3, -3.8]]);
     }
 
-    // --- RAO BELL NOZZLE: parabolic flare, exit ~4x throat, with a hot glowing
-    // throat fading through the bell to a dark cooled lip. Built as N rings
-    // marched aft from a recessed throat; the wall material is inconel and the
-    // emission ramps THROAT(bright) -> MID -> LIP(dark) so the mouth glows. ---
+    // --- RAO BELL NOZZLE seen from behind as a real engine bell: a machined
+    // rim ring at the exit, an inconel OUTER wall, a glowing INNER wall that
+    // ramps hot->dark from the recessed throat, and an emissive throat disk
+    // deep inside the bell (the warm glow you see up the nozzle). Inner and
+    // outer walls are separate surfaces with opposite facing so the renderer's
+    // eye-facing cull shows the right side from every angle. ---
     function bellNozzle(cx, cy, exitR, throatZ) {
-      const SEG = 12;            // angular resolution
-      const STEPS = 5;           // axial rings (throat -> exit)
-      const throatR = exitR * 0.26;       // exit/throat ~3.8:1 diameter
-      const len = exitR * 2.6;            // length ~1.3x exit diameter
-      const exitZ = throatZ - len;        // exit lip is the most -Z
+      const SEG = 12;                     // angular resolution
+      const STEPS = 5;                    // inner-wall axial rings
+      const throatR = exitR * 0.28;       // exit/throat ~3.6:1 diameter
+      const len = exitR * 2.5;            // length ~1.25x exit diameter
+      const wall = 0.035 + exitR * 0.07;  // bell wall thickness at the lip
       // parabolic radius profile (fast initial flare, gentle near the lip).
-      function ringAt(t) {                // t in 0..1 (throat->exit)
-        const r = throatR + (exitR - throatR) * Math.sqrt(t); // parabola
+      function ringAt(t, grow) {          // t in 0..1 (throat->exit)
+        const r = throatR + (exitR - throatR) * Math.sqrt(t) + (grow || 0);
         const z = throatZ - len * t;
         const pts = [];
         for (let k = 0; k < SEG; k++) {
@@ -540,47 +611,69 @@
         }
         return pts;
       }
-      // emission/material lerp across the bell.
       function lerp3(a, b, t) { return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
       function bellColor(t) {
-        // throat(hot) -> mid(orange) -> lip(dark)
-        return t < 0.5 ? lerp3(MAT.throat, MAT.bellMid, t/0.5)
-                       : lerp3(MAT.bellMid, MAT.bellLip, (t-0.5)/0.5);
+        // throat(hot glow) -> mid(dull orange) -> lip(dark cooled metal);
+        // fast falloff so the glow is a warm CORE deep in a dark bell rather
+        // than the whole mouth reading as an orange ball.
+        return t < 0.32 ? lerp3(MAT.throat, MAT.bellMid, t/0.32)
+                        : lerp3(MAT.bellMid, MAT.bellLip, (t-0.32)/0.68);
       }
-      let prev = ringAt(0);
-      const throatCentre = [cx, cy, throatZ + 0.05];
-      // glowing throat disk (brightest), faces aft
+      // (1) emissive throat disk, recessed at the top of the bell, faces aft.
+      const throatRing = ringAt(0);
+      const throatCentre = [cx, cy, throatZ - 0.02];
       for (let k = 0; k < SEG; k++) {
-        const a = prev[k], b = prev[(k + 1) % SEG];
-        M.tri(throatCentre, a, b, MAT.throat);
+        const k2 = (k + 1) % SEG;
+        triD(throatRing[k], throatRing[k2], throatCentre, [0, 0, -1], MAT.throat);
       }
-      // bell wall rings (interior glowing surface, visible looking up the bell)
+      // (2) INNER wall: glowing gradient, faces INWARD/AFT (seen up the bell).
+      let prev = throatRing;
       for (let i = 1; i <= STEPS; i++) {
         const t = i / STEPS;
         const cur = ringAt(t);
-        const cThis = bellColor(t * 0.92);
+        const cThis = bellColor(t * 0.9);
         for (let k = 0; k < SEG; k++) {
           const k2 = (k + 1) % SEG;
-          // wound so the lit surface faces inward/aft toward the viewer
-          M.quad(prev[k], cur[k], cur[k2], prev[k2], cThis);
+          const am = (k + 0.5) / SEG * Math.PI * 2;
+          // want: inward radial + aft, so the glow shows looking up the bell
+          quadD(prev[k], cur[k], cur[k2], prev[k2],
+                [-Math.cos(am), -Math.sin(am), -0.45], cThis);
         }
         prev = cur;
       }
-      // dark outer lip ring (a short skirt facing aft) for a crisp rim.
-      const lip = prev;
-      const skirt = lip.map(p => [cx + (p[0]-cx)*1.12, cy + (p[1]-cy)*1.12, p[2] + 0.04]);
+      const innerLip = prev;
+      // (3) OUTER wall: inconel shell, faces OUTWARD (the bell you see from
+      // the side). Slightly larger radius, fewer steps (it is a smooth cone).
+      const OSTEPS = 3;
+      let oprev = ringAt(0, wall * 0.7);
+      for (let i = 1; i <= OSTEPS; i++) {
+        const t = i / OSTEPS;
+        const cur = ringAt(t, wall);
+        for (let k = 0; k < SEG; k++) {
+          const k2 = (k + 1) % SEG;
+          const am = (k + 0.5) / SEG * Math.PI * 2;
+          quadD(oprev[k], cur[k], cur[k2], oprev[k2],
+                [Math.cos(am), Math.sin(am), 0.3], MAT.nozzleMetal);
+        }
+        oprev = cur;
+      }
+      const outerLip = oprev;
+      // (4) machined RIM ring: the annulus between inner and outer lips,
+      // facing aft — the crisp bright ring that reads "bell" from behind.
       for (let k = 0; k < SEG; k++) {
         const k2 = (k + 1) % SEG;
-        M.quad(skirt[k2], lip[k2], lip[k], skirt[k], MAT.bellLip);
+        quadD(innerLip[k], innerLip[k2], outerLip[k2], outerLip[k],
+              [0, 0, -1], MAT.bellRim);
       }
       // bright wireframe rims at throat + exit for trim.
-      B.loop(ringAt(0));
-      B.loop(lip);
+      B.loop(throatRing);
+      B.loop(innerLip);
     }
-    // 3-engine cluster: 1 centre + 2 outboard (odd-count symmetric row).
-    bellNozzle( 0.00, -0.05, 0.70, TAIL + 0.15); // centre (largest)
-    bellNozzle(-1.05, -0.10, 0.52, TAIL + 0.20); // port
-    bellNozzle( 1.05, -0.10, 0.52, TAIL + 0.20); // starboard
+    // 3-engine cluster growing out of the recessed bay: 1 centre + 2 outboard,
+    // tightly clustered like SSMEs (centre bell high, outboard pair low).
+    bellNozzle( 0.00,  0.10, 0.46, BAY_Z - 0.02); // centre (largest)
+    bellNozzle(-0.70, -0.20, 0.36, BAY_Z - 0.06); // port
+    bellNozzle( 0.70, -0.20, 0.36, BAY_Z - 0.06); // starboard
 
     // === RCS THRUSTER QUADS (4 extremities) ==============================
     // Small recessed black-rimmed nozzle clusters where the torque arm is
@@ -741,6 +834,61 @@
     M.box([-coHW, FLOOR - DECK, coZ0], [coHW, FLOOR, coZ1], MAT.floor);
     M.box([-chHW, FLOOR - DECK, chZ0], [chHW, FLOOR, chZ1], MAT.floor);
 
+    // deck PLATING: alternating plate tones laid just above each deck so the
+    // walk view reads as riveted floor plates, not one flat slab.
+    function plates(hw, z0, z1, n) {
+      for (let s = 0; s < n; s++) {
+        const za = z0 + (z1 - z0) * (s / n);
+        const zb = z0 + (z1 - z0) * ((s + 1) / n);
+        const matP = (s % 2 === 0) ? MAT.floor : MAT.floorDk;
+        quadD([-hw, FLOOR + 0.006, za], [hw, FLOOR + 0.006, za],
+              [hw, FLOOR + 0.006, zb], [-hw, FLOOR + 0.006, zb],
+              [0, 1, 0], matP);
+      }
+    }
+    plates(cpHW - 0.02, cpZ0, cpZ1, 4);
+    plates(coHW - 0.02, coZ0, coZ1, 6);
+    plates(chHW - 0.02, chZ0, chZ1, 5);
+
+    // ceiling LIGHT STRIPS: thin PAIRED rails either side of the spine (warm
+    // emissive, facing down into the cabin). Kept narrow and off-centre so a
+    // standing avatar (eye near the ceiling) never gets a blown-white band
+    // straight overhead.
+    const STRIP_W = 0.045;
+    for (const seg of [[coZ0 + 0.3, cpZ0 - 0.3, 0.42],   // corridor rails
+                       [chZ0 + 0.4, chZ1 - 0.4, 0.85],   // hold rails
+                       [cpZ0 + 0.3, cpZ1 - 0.9, 0.55]]) { // cockpit rails
+      for (const sx of [-1, 1]) {
+        const x0 = sx * seg[2] - STRIP_W, x1 = sx * seg[2] + STRIP_W;
+        quadD([x0, CEIL - 0.02, seg[0]], [x1, CEIL - 0.02, seg[0]],
+              [x1, CEIL - 0.02, seg[1]], [x0, CEIL - 0.02, seg[1]],
+              [0, -1, 0], MAT.strip);
+      }
+    }
+
+    // corridor WALL PANELS: warm cabin accents + teal status strips whose
+    // normals point INTO the cabin so they render when walked past under the
+    // renderer's eye-facing interior culling.
+    for (const s of [-1, 1]) {
+      const x = s * (coHW - 0.03);
+      quadD([x, FLOOR + 0.25, 0.4], [x, FLOOR + 0.25, 2.6],
+            [x, FLOOR + 1.05, 2.6], [x, FLOOR + 1.05, 0.4],
+            [-s, 0, 0], MAT.cabin);
+      quadD([x, FLOOR + 1.15, 0.6], [x, FLOOR + 1.15, 2.4],
+            [x, FLOOR + 1.32, 2.4], [x, FLOOR + 1.32, 0.6],
+            [-s, 0, 0], MAT.screen);
+    }
+    // hold WALL PANELS: gunmetal equipment racks + a warm accent per side.
+    for (const s of [-1, 1]) {
+      const x = s * (chHW - 0.04);
+      quadD([x, FLOOR + 0.2, -4.3], [x, FLOOR + 0.2, -1.6],
+            [x, FLOOR + 1.5, -1.6], [x, FLOOR + 1.5, -4.3],
+            [-s, 0, 0], MAT.bulkhd);
+      quadD([x - s * 0.01, FLOOR + 0.55, -3.9], [x - s * 0.01, FLOOR + 0.55, -2.2],
+            [x - s * 0.01, FLOOR + 1.0, -2.2], [x - s * 0.01, FLOOR + 1.0, -3.9],
+            [-s, 0, 0], MAT.cabin);
+    }
+
     // floor grating lines (accent) running along each deck.
     for (let g = -2; g <= 2; g++) {
       const x = g * 0.4;
@@ -753,27 +901,43 @@
       }
     }
 
-    // --- COCKPIT CONSOLE BANK: an angled panel sweep in front of the seat. ---
+    // --- COCKPIT CONSOLE BANK: a dashboard rising AWAY from the pilot so its
+    // angled face (normal up + aft, toward the seat) survives the renderer's
+    // eye-facing cull from the pilot's eye, with EMISSIVE TEAL SCREENS inset
+    // on the dash. ---
     {
-      const z0 = 5.2, z1 = 6.0, hw = 1.05;
+      const z0 = 5.2, z1 = 5.95, hw = 1.05;
       const base = FLOOR;
-      const top = FLOOR + 0.85;
-      // angled top panel (tilts back toward the pilot, faces up+aft)
-      const fl = [-hw, base + 0.35, z1], fr = [hw, base + 0.35, z1];
-      const bl = [-hw, top, z0],         br = [hw, top, z0];
-      M.box([-hw, base, z1 - 0.12], [hw, base + 0.4, z1], MAT.console); // lower lip
-      M.quad(fl, fr, br, bl, MAT.console);               // angled face
-      // glowing accent seams across the console face (running lights)
+      const yLo = base + 0.30, yHi = base + 0.95;
+      // solid plinth under the dash
+      M.box([-hw, base, z0], [hw, yLo, z1], MAT.console);
+      // angled dash face: near edge low (by the pilot), far edge high.
+      const nl = [-hw, yLo, z0], nr = [hw, yLo, z0];
+      const fl = [-hw, yHi, z1], fr = [hw, yHi, z1];
+      const wantDash = [0, 0.75, -0.65];  // up + aft, toward the seat
+      quadD(nl, nr, fr, fl, wantDash, MAT.console);
+      // point on the dash face at cross-pos u, slope 0..1, lifted off by
+      // `lift` along the face normal (so screens sit proud, no z-fight).
+      function dashP(u, t, lift) {
+        return [u,
+                yLo + (yHi - yLo) * t + wantDash[1] * lift,
+                z0 + (z1 - z0) * t + wantDash[2] * lift];
+      }
+      // emissive teal screen bank (three displays visible from the seat)
+      for (const cx of [-0.62, 0, 0.62]) {
+        const w = 0.24;
+        quadD(dashP(cx - w, 0.22, 0.02), dashP(cx + w, 0.22, 0.02),
+              dashP(cx + w, 0.82, 0.02), dashP(cx - w, 0.82, 0.02),
+              wantDash, MAT.screen);
+      }
+      // glowing accent seams across the dash (running lights)
       for (let k = 0; k <= 3; k++) {
         const t = k / 3;
-        const lx = -hw + 0.1, rx = hw - 0.1;
-        const ay = base + 0.35 + (top - (base + 0.35)) * t;
-        const az = z1 + (z0 - z1) * t;
-        B.seg([lx, ay + 0.01, az], [rx, ay + 0.01, az]);
+        B.seg(dashP(-hw + 0.1, t, 0.012), dashP(hw - 0.1, t, 0.012));
       }
       // two side stalk panels angled inward
-      M.box([-hw - 0.05, base, z0], [-hw + 0.18, top, z0 + 0.5], MAT.console);
-      M.box([ hw - 0.18, base, z0], [ hw + 0.05, top, z0 + 0.5], MAT.console);
+      M.box([-hw - 0.05, base, z0], [-hw + 0.18, yHi, z0 + 0.5], MAT.console);
+      M.box([ hw - 0.18, base, z0], [ hw + 0.05, yHi, z0 + 0.5], MAT.console);
     }
 
     // --- PILOT SEAT: a proper seat shape (base + cushion + back + headrest). ---

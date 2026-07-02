@@ -344,6 +344,7 @@ layout(location = 0) in vec3 a_pos;    // node-local vertex position
 layout(location = 1) in vec3 a_norm;   // node-local unit normal
 layout(location = 2) in vec3 a_color;  // per-triangle material RGB
 uniform mat4 u_viewProj;
+uniform vec3 u_eye;                    // node-local eye position
 out vec3 v_norm;
 out vec3 v_color;
 out vec3 v_viewDir;
@@ -352,10 +353,9 @@ void main() {
   gl_Position = clip;
   v_norm = a_norm;
   v_color = a_color;
-  // approximate view direction in node-local space: the overlay is drawn in
-  // the active node's local frame where the camera sits near the origin, so
-  // -a_pos points roughly toward the eye. Good enough for a rim term.
-  v_viewDir = -a_pos;
+  // true view direction in node-local space (eye is passed as a uniform);
+  // used both for the rim term and for geometric interior culling.
+  v_viewDir = u_eye - a_pos;
 }`;
 
   const OVL_MESH_FRAG_SRC = `#version 300 es
@@ -369,7 +369,14 @@ void main() {
   vec3 N = normalize(v_norm);
   vec3 L = normalize(u_lightDir);
   vec3 V = normalize(v_viewDir);
-  // two-sided shading so back-facing winding still lights (robustness).
+  // GEOMETRIC INTERIOR CULLING: hull normals point OUTWARD, so a fragment
+  // whose normal faces away from the eye is the inside of a hull wall.
+  // Discard it: from outside the ship renders unchanged (outward faces
+  // pass), but from INSIDE (cockpit FP / walk) the hull becomes transparent
+  // and the view sees space + the glowing wireframe + interior detail
+  // (whose normals point into the cabin). The small negative tolerance
+  // avoids silhouette speckle where smooth-interpolated normals graze.
+  if (dot(N, V) < -0.02) discard;
   float ndl = dot(N, L);
   float diff = max(abs(ndl) * 0.85 + 0.15, 0.0); // soft wrap-ish diffuse
   float ambient = 0.28;
@@ -377,6 +384,12 @@ void main() {
   float rim = pow(1.0 - clamp(abs(dot(N, V)), 0.0, 1.0), 3.0);
   vec3 base = v_color * (ambient + diff * 0.95);
   vec3 col = base + rim * 0.35 * (v_color * 0.5 + vec3(0.25, 0.35, 0.45));
+  // EMISSIVE materials (any channel pushed past 1: engine throat glow,
+  // console screens) render unlit at their own colour so they read as
+  // light sources, not as lit paint.
+  float peak = max(v_color.r, max(v_color.g, v_color.b));
+  float glow = smoothstep(1.0, 1.25, peak);
+  col = mix(col, v_color, glow);
   outColor = vec4(col, 1.0);
 }`;
 
@@ -904,7 +917,7 @@ void main() {
   /* Draw the ship overlay onto the default framebuffer, AFTER PostFX
      present. Additive glowing GL_LINES (wireframe) + additive point
      sprites (markers), in node-local space via the scene viewProj. */
-  function drawOverlay(overlay, viewProj) {
+  function drawOverlay(overlay, viewProj, eye) {
     if (!overlay || !ovlLineProg) return;
     const lines = overlay.lines;
     const points = overlay.points;
@@ -957,6 +970,12 @@ void main() {
       gl.useProgram(ovlMeshProg);
       gl.uniformMatrix4fv(uniOM.viewProj, false, viewProj);
       gl.uniform3f(uniOM.lightDir, ld[0], ld[1], ld[2]);
+      // eye position (node-local, same frame as the overlay geometry) for
+      // the interior-culling + rim terms; both overlay passes supply it.
+      const ex = eye ? (eye.x || 0) : 0;
+      const ey = eye ? (eye.y || 0) : 0;
+      const ez = eye ? (eye.z || 0) : 0;
+      gl.uniform3f(uniOM.eye, ex, ey, ez);
       gl.bindVertexArray(ovlMeshVao);
       gl.bindBuffer(gl.ARRAY_BUFFER, ovlMeshVbo);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, S, 0, floats);
@@ -1484,6 +1503,7 @@ void main() {
       uniOP.maxPointSize = gl.getUniformLocation(ovlPtProg, 'u_maxPointSize');
       uniOM.viewProj = gl.getUniformLocation(ovlMeshProg, 'u_viewProj');
       uniOM.lightDir = gl.getUniformLocation(ovlMeshProg, 'u_lightDir');
+      uniOM.eye = gl.getUniformLocation(ovlMeshProg, 'u_eye');
       uniSky.invViewProj = gl.getUniformLocation(skyProg, 'u_invViewProj');
       uniSky.eye = gl.getUniformLocation(skyProg, 'u_eye');
       uniSky.horizon = gl.getUniformLocation(skyProg, 'u_horizon');
@@ -1617,7 +1637,7 @@ void main() {
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         drawSurface(opts.surface, viewProj, eye, invVP);
         surfaceMode = true;
-        drawOverlay(opts.overlay, viewProj);
+        drawOverlay(opts.overlay, viewProj, eye);
         surfaceMode = false;
         // restore the renderer's default GL state (matches every other pass).
         gl.disable(gl.DEPTH_TEST);
@@ -1668,7 +1688,7 @@ void main() {
       // ---- present: FBO -> default framebuffer (lensing lives here) ----
       if (!haveTarget) {
         // emergency direct path: scene already on the default framebuffer.
-        drawOverlay(opts.overlay, viewProj);
+        drawOverlay(opts.overlay, viewProj, eye);
         return;
       }
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1693,7 +1713,7 @@ void main() {
 
       // ---- ship overlay: glowing wireframe + markers, in front, in the
       // active node's local frame (same viewProj). No-op without opts. ----
-      drawOverlay(opts.overlay, viewProj);
+      drawOverlay(opts.overlay, viewProj, eye);
     },
   };
 

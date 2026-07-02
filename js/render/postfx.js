@@ -108,7 +108,35 @@
     vec3 jodie = reinhardJodie(c);
     // engage the colour-preserving blend only near/above the clipping point.
     float hi = smoothstep(0.9, 2.2, max(c.r, max(c.g, c.b)));
-    return clamp(mix(aces, jodie, hi * 0.6), 0.0, 1.0);
+    return clamp(mix(aces, jodie, hi * 0.72), 0.0, 1.0);
+  }
+
+  // v13 ANTI-CLIP: hue-preserving HDR range pre-compression, applied BEFORE
+  // the final tonemap. Dense additive point-sprite stacks (galaxy interiors)
+  // reach linear HDR 5-30+, where ACES and Jodie alike saturate to a flat
+  // white blob. We compress LUMINANCE with a bounded Reinhard shoulder that
+  // is EXACT IDENTITY below COMP_START — so the starfield, faint stars and
+  // nebula mids keep today's brightness — and scale RGB by Lout/L so channel
+  // ratios (hue + chroma) survive at any intensity. The join at COMP_START is
+  // C1-continuous (slope 1 on both sides), so there is no visible band. A
+  // mild saturation lift keyed to the PRE-compression luminance keeps the
+  // squeezed cores vivid magenta/teal/gold rather than washed-out pastel.
+  const float COMP_START = 1.15;   // identity below this: mids/lows untouched
+  const float COMP_SPAN  = 0.62;   // log shoulder scale (smaller = stronger)
+  vec3 compressHDR(vec3 c) {
+    float L = luminance(c);
+    if (L <= COMP_START) return c;
+    float x = L - COMP_START;
+    // LOG shoulder (slope 1 at the join): unlike a hard-asymptote Reinhard it
+    // never fully flattens, so a 30x core still renders BRIGHTER than a 5x
+    // arm — value structure survives inside dense galaxy interiors.
+    float Lout = COMP_START + COMP_SPAN * log(1.0 + x / COMP_SPAN);
+    vec3 cc = c * (Lout / max(L, 1e-4));
+    // Re-saturate the hottest pixels so compression reads as GLOWING COLOUR.
+    float hi = smoothstep(COMP_START, 4.5, L);
+    float l2 = luminance(cc);
+    cc = max(mix(cc, mix(vec3(l2), cc, 3.0), hi), vec3(0.0));
+    return cc;
   }
 
   void main() {
@@ -144,6 +172,7 @@
     c += ring * vec3(0.75, 0.85, 1.0) * (c + vec3(0.06));
     c *= shadow;
     c *= EXPOSURE;                       // expose BEFORE the tonemap
+    c = compressHDR(c);                  // hue-preserving anti-clip shoulder
     vec3 mapped = tonemapBright(c);      // bright, colourful filmic roll-off
     // A touch of post-tonemap vividness for that extra Cosmos-TV pop without
     // affecting clipping behaviour (mix toward colour, away from grey).

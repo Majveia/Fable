@@ -111,26 +111,32 @@ ShipModel.build();
     'z in [' + zmin.toFixed(1) + ',' + zmax.toFixed(1) + ']');
 
   // detail level: the believable hull is meaningfully detailed (panel
-  // greebles, RCS quads, bell nozzles, sensor domes) -> a healthy tri count.
+  // greebles, RCS quads, bell nozzles, sensor domes) -> a healthy tri count,
+  // but bounded so the overlay upload stays cheap.
   check('mesh is detailed (>= 400 triangles)', nTri >= 400, 'nTri=' + nTri);
+  check('mesh stays lean (<= 2500 triangles)', nTri <= 2500, 'nTri=' + nTri);
 
   // material colours are non-negative and finite; emissive (>1) is allowed
-  // ONLY for warm glowing parts (engine throat) — confirm at least one
-  // emissive-warm triangle exists (R>1 and R>G>B), and there is no spurious
-  // emissive blue/green (cool over-bright would look wrong under bloom).
-  let colNonNeg = true, warmEmissive = 0, badEmissive = 0;
+  // ONLY for two deliberate glow families: WARM (engine throat / cabin light
+  // strips: R>1, R>=G>=B) and TEAL (console screens / engine readout:
+  // B>1, B>=G>=R). Confirm at least one of each exists, and reject any other
+  // over-bright material (spurious emissive would look wrong under bloom).
+  let colNonNeg = true, warmEmissive = 0, tealEmissive = 0, badEmissive = 0;
   for (let i = 0; i < C.length; i += 3) {
     const r = C[i], g = C[i + 1], b = C[i + 2];
     if (r < 0 || g < 0 || b < 0) colNonNeg = false;
     if (r > 1 || g > 1 || b > 1) {
-      if (r > 1 && r >= g && g >= b) warmEmissive++;   // warm glow (engine)
-      else badEmissive++;                               // cool over-bright
+      if (r > 1 && r >= g && g >= b) warmEmissive++;        // warm glow (engine)
+      else if (b > 1 && b >= g && g >= r) tealEmissive++;   // teal screens
+      else badEmissive++;                                   // anything else
     }
   }
   check('all triColor channels non-negative', colNonNeg);
   check('has warm emissive glow (engine throat, R>1, R>=G>=B)', warmEmissive > 0,
     'warmEmissive=' + warmEmissive);
-  check('no cool/over-bright emissive material', badEmissive === 0,
+  check('has teal emissive screens (console/readout, B>1, B>=G>=R)', tealEmissive > 0,
+    'tealEmissive=' + tealEmissive);
+  check('no other over-bright emissive material', badEmissive === 0,
     'badEmissive=' + badEmissive);
 
   // winding vs stored normals: the geometric face normal (from CCW winding)

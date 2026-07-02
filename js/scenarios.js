@@ -165,14 +165,46 @@ function makeGalaxy(opts) {
     return bhMass + diskMass * (1 - Math.exp(-t) * (1 + t));
   };
 
-  // color: palette index, -1 = stellar population, -2 = nebula hue (per particle)
-  const place = (count, mass, radLo, radHi, color, type, armTight, zMul, rMin) => {
+  /* v13 STRUCTURE: colour draws by galactic REGION so the additive stack
+     reads as a structured spiral, not one white smear.
+       young  — hot blue O/B stars riding the arms (0/1/2 + accretion blue)
+       knot   — arm emission knots: H-alpha red + OIII teal + magenta/gold
+       fringe — cool violet / royal-blue outer-halo gas */
+  const youngStarColor = () => {
+    const u = _rng();
+    return u < 0.50 ? 0 : u < 0.80 ? 1 : u < 0.94 ? 2 : 8;
+  };
+  const armKnotColor = () => {
+    const u = _rng();
+    if (u < 0.38) return 12;   // H-alpha red
+    if (u < 0.60) return 13;   // OIII teal-green
+    if (u < 0.76) return 10;   // nebula teal
+    if (u < 0.88) return 9;    // magenta
+    return 14;                 // gold
+  };
+  const fringeColor = () => {
+    const u = _rng();
+    return u < 0.44 ? 15 : u < 0.80 ? 17 : 9;   // violet / royal blue / magenta
+  };
+
+  // color: palette index, or a draw code:
+  //   -1 stellar population  -2 nebula hue  -3 young blue arm stars
+  //   -4 arm emission knots  -5 violet/royal halo fringe
+  // thetaOff shifts a population off the arm ridge (dust lanes sit on the
+  // arm INNER edge at -thetaOff; gas knots at +thetaOff) and smear is the
+  // uniform azimuthal blur — small smear = crisp arm tracer. The radial
+  // draw is SHIFTED by lo (not clamped) so no population piles up in a
+  // bright ring at the inner cut — the old clamp stacked ~16% of the disk
+  // exactly at innerR, feeding the white-blob core.
+  const place = (count, mass, radLo, radHi, color, type, armTight, zMul, rMin,
+                 thetaOff = 0, smear = 0.25) => {
     const lo = Math.max(innerR, rMin || 0);
+    const span = Math.max(radius - lo, 1);
     for (let i = 0; i < count; i++) {
-      let r = -Math.log(1 - _rng()) * scale;
-      r = Math.max(lo, Math.min(r, radius));
+      const r = lo + ((-Math.log(1 - _rng()) * scale) % span);
       const arm = (i % arms) * (2 * Math.PI / arms);
-      const theta = arm + (r / radius) * 3.2 * spinDir + gauss() * armTight + _rng() * 0.25;
+      const theta = arm + (r / radius) * 3.2 * spinDir + thetaOff * spinDir
+                  + gauss() * armTight + _rng() * smear;
       const z = gauss() * zScale * zMul;
       const ct = Math.cos(theta), st = Math.sin(theta);
       const x = cx + (ux * ct + vx_ * st) * r + nx * z;
@@ -184,37 +216,78 @@ function makeGalaxy(opts) {
       const tvz = (-uz * st + vz_ * ct) * spinDir * v;
       const c = color === -1 ? starColor()
               : color === -2 ? gasColor()
+              : color === -3 ? youngStarColor()
+              : color === -4 ? armKnotColor()
+              : color === -5 ? fringeColor()
               : color;
       bodies.add(x, y, zz, cvx + tvx, cvy + tvy, cvz + tvz,
                  mass, rand(radLo, radHi), c, type, null);
     }
   };
 
-  place(stars, starMass, 0.7, 1.9, -1, TYPE_STAR, 0.50, 1.0);
-  // Dust lanes hug the arms more tightly than stars do.
-  place(dust, 0.001, 0.3, 0.8, 11, TYPE_DUST, 0.28, 0.7);
-  // Molecular gas: soft billboards tracing the arms — kept out of the
-  // bright core, where additive overlap would blow out the image.
-  // v11 LUMINOUS: wider gas sprites so the molecular-cloud emission along the
-  // arms reads as glowing saturated colour (more additive overlap = grander).
-  place(gas, 0.001, 15, 32, -2, TYPE_GAS, 0.22, 0.6, radius * 0.22);
+  // Population splits (totals stay EXACTLY stars / dust / gas so every
+  // caller's body-budget arithmetic — supercluster, popUniverse — holds).
+  const youngN = Math.floor(stars * 0.42), oldN = stars - youngN;
+  const laneN = Math.floor(dust * 0.28), diskDustN = dust - laneN;
+  const coreGasN = Math.min(gas, Math.max(2, Math.min(48, Math.floor(gas * 0.03))));
+  const fringeGasN = Math.floor((gas - coreGasN) * 0.10);
+  const knotGasN = gas - coreGasN - fringeGasN;
 
-  // Spherical bulge, dispersion-supported.
+  // OLD smooth disk: warm dwarfs, loose scatter — the dim inter-arm glow.
+  place(oldN, starMass, 0.7, 1.6, -1, TYPE_STAR, 0.55, 1.0);
+  // YOUNG blue stars strung TIGHTLY along the arms (high contrast).
+  place(youngN, starMass, 0.8, 2.0, -3, TYPE_STAR, 0.16, 0.55, radius * 0.14, 0, 0.08);
+  // General disk dust, kept off the very centre (no white-core pile-up).
+  place(diskDustN, 0.001, 0.3, 0.7, 11, TYPE_DUST, 0.30, 0.7, radius * 0.10);
+  // DARK dust lanes: thin, tight threads hugging the arm INNER edges so
+  // each bright arm is bordered by a visibly darker lane.
+  place(laneN, 0.001, 0.2, 0.45, 11, TYPE_DUST, 0.07, 0.5, radius * 0.10, -0.11, 0.05);
+  // Arm EMISSION KNOTS: many smaller gas sprites (was few huge ones) in
+  // H-alpha red / OIII teal / magenta / gold, riding the arm ridge just
+  // outside the dust lane. Smaller sprites = additive sum stays in a range
+  // the tonemap can keep coloured; hue variety = knots, not a smear.
+  place(knotGasN, 0.001, 3, 8, -4, TYPE_GAS, 0.13, 0.5, radius * 0.18, 0.05, 0.10);
+  // Cool violet / royal-blue gas FRINGE around the outer disk — sparse and
+  // far out so it rims the galaxy instead of blanketing the whole disk.
+  place(fringeGasN, 0.001, 6, 13, -5, TYPE_GAS, 1.4, 2.4, radius * 0.62, 0, 6.28);
+
+  // Compact warm-gold BULGE, dispersion-supported. Smaller, warmer sprites
+  // than before (gold/K-warm draw) so the core reads warm gold, not white.
   const bulgeN = Math.floor(stars * 0.12);
   for (let i = 0; i < bulgeN; i++) {
-    const r = innerR + Math.abs(gauss()) * radius * 0.08;
+    const r = innerR * 0.5 + Math.abs(gauss()) * radius * 0.07;
     const th = _rng() * 2 * Math.PI, ph = Math.acos(rand(-1, 1));
-    const sx = r * Math.sin(ph) * Math.cos(th), sy = r * Math.cos(ph), sz = r * Math.sin(ph) * Math.sin(th);
+    const sx = r * Math.sin(ph) * Math.cos(th), sy = r * Math.cos(ph) * 0.7, sz = r * Math.sin(ph) * Math.sin(th);
     const v = Math.sqrt(enclosed(r) / r + haloV2(r)) * rand(0.5, 0.9);
     const dth = _rng() * 2 * Math.PI, dph = Math.acos(rand(-1, 1));
+    const u = _rng();
     bodies.add(cx + sx, cy + sy, cz + sz,
       cvx + v * Math.sin(dph) * Math.cos(dth),
       cvy + v * Math.cos(dph),
       cvz + v * Math.sin(dph) * Math.sin(dth),
-      starMass, rand(0.7, 1.6), rand(0, 1) < 0.7 ? 5 : 4, TYPE_STAR, null);
+      starMass, rand(0.5, 1.1), u < 0.42 ? 5 : u < 0.78 ? 14 : 6, TYPE_STAR, null);
   }
 
-  // Sparse old halo stars on randomly inclined orbits.
+  // A FEW medium gold gas glows on the bulge: pure-hue sprites (no white
+  // core in the shader) that tint the whole core warm gold.
+  for (let i = 0; i < coreGasN; i++) {
+    const r = Math.abs(gauss()) * radius * 0.05;
+    const th = _rng() * 2 * Math.PI;
+    const z = gauss() * zScale * 0.5;
+    const ct = Math.cos(th), st = Math.sin(th);
+    const v = Math.sqrt(enclosed(Math.max(r, innerR)) / Math.max(r, innerR)) * 0.6;
+    bodies.add(
+      cx + (ux * ct + vx_ * st) * r + nx * z,
+      cy + (uy * ct + vy_ * st) * r + ny * z,
+      cz + (uz * ct + vz_ * st) * r + nz * z,
+      cvx + (-ux * st + vx_ * ct) * spinDir * v,
+      cvy + (-uy * st + vy_ * ct) * spinDir * v,
+      cvz + (-uz * st + vz_ * ct) * spinDir * v,
+      0.001, rand(radius * 0.02, radius * 0.04) + 5, _rng() < 0.8 ? 14 : 12, TYPE_GAS, null);
+  }
+
+  // Sparse old halo stars on randomly inclined orbits — now with a
+  // violet / royal-blue sprinkle so the halo fringe carries colour.
   const haloN = Math.floor(stars * 0.06);
   for (let i = 0; i < haloN; i++) {
     const r = rand(radius * 0.4, radius * 1.5);
@@ -223,9 +296,10 @@ function makeGalaxy(opts) {
     // Tangential direction perpendicular to the radial vector.
     const [tx1, ty1, tz1] = basisFor(sx / r, sy / r, sz / r);
     const v = Math.sqrt(enclosed(r) / r + haloV2(r)) * rand(0.7, 1.0);
+    const u = _rng();
     bodies.add(cx + sx, cy + sy, cz + sz,
       cvx + tx1 * v, cvy + ty1 * v, cvz + tz1 * v,
-      0.001, rand(0.4, 1.0), 6, TYPE_DUST, null);
+      0.001, rand(0.4, 1.0), u < 0.30 ? 15 : u < 0.55 ? 17 : 6, TYPE_DUST, null);
   }
 }
 
@@ -247,8 +321,10 @@ def('galaxy', 'SPIRAL GALAXY', (budget = DEF_BUDGET) => {
   Object.assign(P().cfg, { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 });
   const g = budget.gpu;
   const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;   // WebGPU tier
+  // v13 STRUCTURE: more, smaller gas knots + a touch less dust (matches
+  // the persistent Cosmos popGalaxy tuning) — coloured spiral, not smear.
   makeGalaxy({ cx: 0, cy: 0, cz: 0, cvx: 0, cvy: 0, cvz: 0,
-    stars: g ? 12000 : 4600, dust: g ? 128000 * X : 9000, gas: g ? 6000 * Math.min(X, 2) : 900,
+    stars: g ? 12000 : 4600, dust: g ? 110000 * X : 8400, gas: g ? 9000 * Math.min(X, 2) : 1400,
     radius: 900, bhMass: 40000, tiltRad: 0.0, spinDir: 1 });
   return { camDist: 1500, lightPos: { x: 0, y: 0, z: 0 } };
 });
@@ -257,7 +333,7 @@ def('collision', 'GALAXY COLLISION', (budget = DEF_BUDGET) => {
   Object.assign(P().cfg, { dt: 0.22, substeps: 1, softening: 6, captureRadius: 6, myrPerT: 0.5 });
   const g = budget.gpu;
   const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
-  const stars = g ? 7000 : 2800, dust = g ? 85000 * X : 5600, gas = g ? 2600 * Math.min(X, 2) : 380;
+  const stars = g ? 7000 : 2800, dust = g ? 74000 * X : 5200, gas = g ? 4200 * Math.min(X, 2) : 620;
   makeGalaxy({ cx: -750, cy: -80, cz: -260, cvx: 2.4, cvy: 0.2, cvz: 0.9,
     stars, dust, gas, radius: 600, bhMass: 26000,
     tiltRad: 0.15, azimuthRad: 0.4, spinDir: 1 });
@@ -566,7 +642,7 @@ def('binary', 'BINARY BLACK HOLES', (budget = DEF_BUDGET) => {
   const g = budget.gpu;
   const X = g && budget.maxBodies > (1 << 20) ? 4 : 1;
   const m = 22000, d = 560;
-  const st = g ? 5000 : 2600, du = g ? 50000 * X : 5200, ga = g ? 2000 * Math.min(X, 2) : 300;
+  const st = g ? 5000 : 2600, du = g ? 44000 * X : 4800, ga = g ? 3200 * Math.min(X, 2) : 520;
   const v = Math.sqrt(1.6 * m / (2 * d));   // each side carries its disk (1.6m total)
   makeGalaxy({ cx: -d / 2, cy: 0, cz: 0, cvx: 0, cvy: v * 0.25, cvz: v,
     stars: st, dust: du, gas: ga, radius: 240, bhMass: m,
